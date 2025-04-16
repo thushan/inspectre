@@ -1,22 +1,21 @@
 package commands
 
 import (
-	"sort"
-	"time"
-
+	"github.com/thushan/inspectre/internal/version"
 	"github.com/urfave/cli/v2"
+	"sort"
 )
 
 func NewApp() *cli.App {
 	app := &cli.App{
-		Name:                 "inspectre",
-		Usage:                "Code Analysis Tool to inspect repositories",
-		Version:              "0.1.0",
-		Compiled:             time.Now(),
+		Name:                 version.Name,
+		Usage:                version.Description,
+		Version:              version.Version,
+		Compiled:             version.Date,
 		EnableBashCompletion: true,
 		Authors: []*cli.Author{
 			{
-				Name: "Inspectre Team",
+				Name: version.Authors,
 			},
 		},
 		Commands: []*cli.Command{},

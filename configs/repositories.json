@@ -1,0 +1,31 @@
+{
+    "version": 1,
+    "repositories": [
+        {
+          "name": "repo1",
+          "url": "https://github.com/user/repo1.git",
+          "type": "github",
+          "auth": {
+            "username": "your-github-username",
+            "token": "${GITHUB_TOKEN}"
+          }
+        },
+        {
+          "name": "repo2",
+          "url": "https://gitlab.com/user/repo2.git",
+          "type": "gitlab",
+          "auth": {
+            "token": "your-gitlab-token"
+          }
+        },
+        {
+          "name": "repo3",
+          "url": "https://bitbucket.org/user/repo3.git",
+          "type": "bitbucket",
+          "auth": {
+            "username": "your-bitbucket-username",
+            "password": "your-bitbucket-password"
+          }
+        }
+      ]
+}
