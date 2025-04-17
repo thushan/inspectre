@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/thushan/inspectre/internal/core/config"
 	"github.com/thushan/inspectre/internal/core/repository"
@@ -82,6 +83,12 @@ func CoreCommands() []*cli.Command {
 					Aliases: []string{"c"},
 					Usage:   "Custom path for configuration data",
 				},
+				&cli.BoolFlag{
+					Name:    "no-wait",
+					Aliases: []string{"n"},
+					Usage:   "Don't wait for task to complete (run in background)",
+					Value:   false,
+				},
 			},
 			Action: runAction,
 		},
@@ -149,7 +156,6 @@ func CoreCommands() []*cli.Command {
 		},
 	}
 }
-
 func runAction(c *cli.Context) error {
 	if err := setup(c.String("config")); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
@@ -165,12 +171,65 @@ func runAction(c *cli.Context) error {
 		return fmt.Errorf("failed to create task: %w", err)
 	}
 
+	noWait := c.Bool("no-wait")
+
+	// Start the task
 	if err := taskManager.StartTask(task.ID); err != nil {
 		return fmt.Errorf("failed to start task: %w", err)
 	}
 
 	fmt.Printf("Started analysis task %s for repository %s\n", task.ID, repoURL)
-	return nil
+
+	if noWait {
+		fmt.Printf("Task is running in the background. Check status with: inspectre ps\n")
+		fmt.Printf("View logs with: inspectre logs %s\n", task.ID)
+		return nil
+	}
+
+	fmt.Println("Waiting for task to complete...")
+
+	// Use a more reliable pattern for monitoring task completion
+	for {
+		time.Sleep(1 * time.Second)
+
+		currentTask, err := taskManager.GetTask(task.ID)
+		if err != nil {
+			return fmt.Errorf("failed to get task status: %w", err)
+		}
+
+		if currentTask.Status == "Completed" || currentTask.Status == "Failed" {
+			// Task has finished
+			if currentTask.Status == "Failed" {
+				return fmt.Errorf("task failed: %s", currentTask.Error)
+			}
+
+			fmt.Println("Task completed successfully")
+
+			// Try multiple times to get the log file since we may have just closed it
+			var reader io.ReadCloser
+			var logErr error
+
+			for retry := 0; retry < 3; retry++ {
+				reader, logErr = taskManager.GetLogReader(task.ID)
+				if logErr == nil {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+
+			if logErr != nil {
+				return fmt.Errorf("failed to get logs: %w", logErr)
+			}
+			defer reader.Close()
+
+			// Copy log contents to stdout
+			if _, err := io.Copy(os.Stdout, reader); err != nil {
+				return fmt.Errorf("failed to read logs: %w", err)
+			}
+
+			return nil
+		}
+	}
 }
 
 func psAction(c *cli.Context) error {

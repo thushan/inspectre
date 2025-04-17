@@ -22,13 +22,8 @@ func NewApp() *cli.App {
 	}
 
 	app.Commands = append(app.Commands, CoreCommands()...)
-	/*
-		app.Commands = append(app.Commands, RepositoryCommands()...)
-		app.Commands = append(app.Commands, PluginCommands()...)
-		app.Commands = append(app.Commands, ConfigCommands()...)
-		app.Commands = append(app.Commands, AnalysisCommands()...)
-		app.Commands = append(app.Commands, SystemCommands()...)
-	*/
+	app.Commands = append(app.Commands, ExtensionCommands()...)
+	app.Commands = append(app.Commands, InsightsCommands()...)
 
 	sortCommands(app.Commands)
 

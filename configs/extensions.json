@@ -4,7 +4,7 @@
     {
       "name": "file_counter",
       "type": "cli",
-      "path": "plugins/file_counter.sh",
+      "path": "file-counter.sh",
       "description": "Counts files by type",
       "version": "1.0.0",
       "author": "Inspectre Team",
@@ -16,7 +16,7 @@
     {
       "name": "code_complexity",
       "type": "python",
-      "path": "plugins/complexity.py",
+      "path": "complexity.py",
       "description": "Analyse code complexity",
       "version": "1.0.0",
       "author": "Inspectre Team",
@@ -28,7 +28,7 @@
     {
       "name": "dependency_analyser",
       "type": "golang",
-      "path": "plugins/deps.so",
+      "path": "deps.so",
       "description": "Analyse dependencies",
       "version": "1.0.0",
       "author": "Inspectre Team",

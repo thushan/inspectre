@@ -17,6 +17,7 @@ var (
 // Metric represents a single measurement from an analyser
 type Metric struct {
 	Name      string            `json:"name"`
+	Key       string            `json:"key,omitempty"`
 	Value     interface{}       `json:"value"`
 	Labels    map[string]string `json:"labels,omitempty"`
 	Timestamp time.Time         `json:"timestamp"`

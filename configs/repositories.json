@@ -11,6 +11,12 @@
           }
         },
         {
+          "name": "smash",
+          "url": "https://github.com/thushan/smash.git",
+          "type": "github",
+          "auth": {}
+        },
+        {
           "name": "repo2",
           "url": "https://gitlab.com/user/repo2.git",
           "type": "gitlab",

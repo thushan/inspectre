@@ -37,10 +37,12 @@ type RepositoryManager interface {
 type Task struct {
 	ID         string    `json:"id"`
 	Repository string    `json:"repository"` // Repository URL or name
-	Status     string    `json:"status"`     // Created, Running, Completed, Failed
+	Status     string    `json:"status"`     // Created, Running, Completed, Foiled
 	StartTime  time.Time `json:"start_time"`
 	EndTime    time.Time `json:"end_time,omitempty"`
-	WorkDir    string    `json:"work_dir"` // Temporary directory where repo is cloned
-	LogFile    string    `json:"log_file"` // Path to log file
+	BaseDir    string    `json:"base_dir"`   // Base directory for all task files
+	RepoDir    string    `json:"repo_dir"`   // Directory where repo is cloned
+	AssetsDir  string    `json:"assets_dir"` // Directory for storing assets/results
+	LogFile    string    `json:"log_file"`   // Path to log file
 	Error      string    `json:"error,omitempty"`
 }
