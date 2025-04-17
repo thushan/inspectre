@@ -1,0 +1,60 @@
+# To test / verify
+# macOS / Linux:
+# $ docker run -ti -v "$PWD:$PWD" -w "$PWD" goreleaser/goreleaser:latest release --snapshot --clean
+# windows (Git bash):
+# $ MSYS_NO_PATHCONV=1 docker run -ti -v "$PWD:$PWD" -w "$PWD" goreleaser/goreleaser:latest release --snapshot --clean
+project_name: inspectre
+
+before:
+  hooks:
+    - go mod download
+
+release:
+  name_template: "{{.ProjectName}}-v{{.Version}}"
+  draft: false
+  prerelease: auto
+  make_latest: true
+
+snapshot:
+  name_template: '{{ incpatch .Version }}-{{.ShortCommit}}'
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goarch:
+      - amd64
+      - arm64
+    goamd64:
+      # https://github.com/golang/go/wiki/MinimumRequirements#amd64
+      - v1
+    goos:
+      - darwin
+      - freebsd
+      - linux
+      - windows
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X "github.com/thushan/inspectre/main.Version=v{{.Version}}"
+      - -X "github.com/thushan/inspectre/main.Commit={{.Commit}}"
+      - -X "github.com/thushan/inspectre/main.Date={{.CommitDate}}"
+      - -X "github.com/thushan/inspectre/main.User=goreleaser"
+checksum:
+  name_template: "checksums.txt"
+
+archives:
+  - files:
+      - LICENSE
+    format_overrides:
+      - goos: windows
+        format: zip
+      - goos: darwin
+        format: zip
+    name_template: >-
+      {{ .ProjectName }}_v{{- .Version }}_{{- if eq .Os "darwin" }}macos_{{- else }}{{ .Os }}_{{ end }}{{- .Arch }}
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge"

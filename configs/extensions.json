@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "name": "file_counter",
+      "type": "cli",
+      "path": "plugins/file_counter.sh",
+      "description": "Counts files by type",
+      "version": "1.0.0",
+      "author": "Inspectre Team",
+      "config": {
+        "exclude_dirs": ".git,node_modules,vendor"
+      },
+      "enabled": true
+    },
+    {
+      "name": "code_complexity",
+      "type": "python",
+      "path": "plugins/complexity.py",
+      "description": "Analyse code complexity",
+      "version": "1.0.0",
+      "author": "Inspectre Team",
+      "config": {
+        "max_complexity": "10"
+      },
+      "enabled": true
+    },
+    {
+      "name": "dependency_analyser",
+      "type": "golang",
+      "path": "plugins/deps.so",
+      "description": "Analyse dependencies",
+      "version": "1.0.0",
+      "author": "Inspectre Team",
+      "config": {
+        "depth": "2"
+      },
+      "enabled": true
+    }
+  ]
+}
