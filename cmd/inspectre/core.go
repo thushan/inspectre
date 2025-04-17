@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 
 	"github.com/thushan/inspectre/internal/core/config"
 	"github.com/thushan/inspectre/internal/core/repository"
@@ -81,6 +82,12 @@ func CoreCommands() []*cli.Command {
 					Name:    "config",
 					Aliases: []string{"c"},
 					Usage:   "Custom path for configuration data",
+				},
+				&cli.BoolFlag{
+					Name:    "no-wait",
+					Aliases: []string{"n"},
+					Usage:   "Don't wait for task to complete (run in background)",
+					Value:   false,
 				},
 			},
 			Action: runAction,
@@ -165,12 +172,59 @@ func runAction(c *cli.Context) error {
 		return fmt.Errorf("failed to create task: %w", err)
 	}
 
+	// Add no-wait flag to allow background execution
+	noWait := c.Bool("no-wait")
+
 	if err := taskManager.StartTask(task.ID); err != nil {
 		return fmt.Errorf("failed to start task: %w", err)
 	}
 
 	fmt.Printf("Started analysis task %s for repository %s\n", task.ID, repoURL)
-	return nil
+
+	if noWait {
+		fmt.Printf("Task is running in the background. Check status with: inspectre ps\n")
+		fmt.Printf("View logs with: inspectre logs %s\n", task.ID)
+		return nil
+	}
+
+	fmt.Println("Waiting for task to complete...")
+
+	// Monitor task status until completion
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			currentTask, err := taskManager.GetTask(task.ID)
+			if err != nil {
+				return fmt.Errorf("failed to get task status: %w", err)
+			}
+
+			if currentTask.Status == "Completed" || currentTask.Status == "Failed" {
+				// Task has finished
+				if currentTask.Status == "Failed" {
+					return fmt.Errorf("task failed: %s", currentTask.Error)
+				}
+
+				fmt.Println("Task completed successfully")
+
+				// Show task logs
+				reader, err := taskManager.GetLogReader(task.ID)
+				if err != nil {
+					return fmt.Errorf("failed to get logs: %w", err)
+				}
+				defer reader.Close()
+
+				// Copy log contents to stdout
+				if _, err := io.Copy(os.Stdout, reader); err != nil {
+					return fmt.Errorf("failed to read logs: %w", err)
+				}
+
+				return nil
+			}
+		}
+	}
 }
 
 func psAction(c *cli.Context) error {
