@@ -113,7 +113,9 @@ func (m *Manager) GetTask(taskID string) (*repository.Task, error) {
 		return nil, ErrTaskNotFound
 	}
 
-	return task, nil
+	// Create a copy of the task to avoid concurrent modification issues
+	taskCopy := *task
+	return &taskCopy, nil
 }
 
 // ListTasks returns all tasks
@@ -163,6 +165,19 @@ func (m *Manager) GetLogReader(taskID string) (io.ReadCloser, error) {
 	return os.Open(task.LogFile)
 }
 
+// CloseTaskLog closes the log file for a task
+func (m *Manager) CloseTaskLog(taskID string) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+
+	if writer, exists := m.logWriters[taskID]; exists {
+		if closer, ok := writer.(io.Closer); ok {
+			_ = closer.Close() // Ignore error on close
+		}
+		delete(m.logWriters, taskID)
+	}
+}
+
 // runTask performs the actual repository analysis
 func (m *Manager) runTask(task *repository.Task) {
 	logger := func(format string, args ...interface{}) {
@@ -186,7 +201,7 @@ func (m *Manager) runTask(task *repository.Task) {
 		repo = &repository.Repository{
 			URL:  task.Repository,
 			Type: repository.GuessRepoType(task.Repository),
-			Auth: repository.Auth{},
+			Auth: repository.Auth{}, // Empty Auth struct
 		}
 	}
 
@@ -221,7 +236,6 @@ func (m *Manager) runTask(task *repository.Task) {
 		}
 	}
 
-	// Create analyser manager
 	analyserManager := analysis.NewManager(analysers, logger)
 
 	// Prepare environment variables for analysers
@@ -232,7 +246,6 @@ func (m *Manager) runTask(task *repository.Task) {
 		"TASK_ID":         task.ID,
 	}
 
-	// Run analysis
 	logger("Running analysers on repository...")
 	results, err := analyserManager.AnalyseRepository(task.WorkDir, env)
 	if err != nil {
@@ -240,7 +253,6 @@ func (m *Manager) runTask(task *repository.Task) {
 		return
 	}
 
-	// Log analysis results
 	logger("Analysis completed with %d result sets", len(results))
 	for _, result := range results {
 		logger("Analyser %s: %d metrics collected (success=%v)",
@@ -273,6 +285,8 @@ func (m *Manager) runTask(task *repository.Task) {
 	m.tasksMu.Unlock()
 
 	logger("Task completed at %s", task.EndTime.Format(time.RFC3339))
+
+	m.CloseTaskLog(task.ID)
 }
 
 // markTaskFailed updates a task's status to failed
@@ -285,6 +299,8 @@ func (m *Manager) markTaskFailed(task *repository.Task, errorMsg string) {
 
 	m.WriteLog(task.ID, fmt.Sprintf("Task failed: %s", errorMsg))
 	m.WriteLog(task.ID, fmt.Sprintf("Task ended at %s", task.EndTime.Format(time.RFC3339)))
+
+	m.CloseTaskLog(task.ID)
 }
 
 // isURL checks if a string is a URL
