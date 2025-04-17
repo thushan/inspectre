@@ -98,6 +98,7 @@ func (a *GitAnalyser) Run() ([]Metric, error) {
 	for _, c := range topContributors {
 		metrics = append(metrics, Metric{
 			Name:      "contributor_commits",
+			Key:       c.Email,
 			Value:     c.Commits,
 			Labels:    map[string]string{"email": c.Email},
 			Timestamp: now,

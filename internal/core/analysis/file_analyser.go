@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -81,9 +82,9 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 		}
 
 		// Get file extension
-		ext := strings.ToLower(filepath.Ext(path))
+		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if ext == "" {
-			ext = "(no extension)"
+			ext = "(none)"
 		}
 		a.extensionMap[ext]++
 
@@ -94,38 +95,44 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 		return nil, fmt.Errorf("file analysis failed: %w", err)
 	}
 
-	// Prepare metrics
-	var metrics []Metric
 	now := time.Now()
+	nExt := len(a.extensionMap)
+	metricTotals := 3
 
-	// Add total counts
-	metrics = append(metrics, Metric{
+	exts := make([]string, 0, nExt)
+	for ext := range a.extensionMap {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+
+	metrics := make([]Metric, metricTotals+nExt)
+
+	metrics[0] = Metric{
 		Name:      "total_files",
 		Value:     a.totalFiles,
 		Timestamp: now,
-	})
-
-	metrics = append(metrics, Metric{
+	}
+	metrics[1] = Metric{
 		Name:      "total_size_bytes",
 		Value:     a.totalSize,
 		Timestamp: now,
-	})
-
-	metrics = append(metrics, Metric{
+	}
+	metrics[2] = Metric{
 		Name:      "largest_file",
-		Value:     a.largestFile,
+		Key:       a.largestFile,
+		Value:     a.largestSize,
 		Labels:    map[string]string{"size_bytes": fmt.Sprintf("%d", a.largestSize)},
 		Timestamp: now,
-	})
+	}
 
-	// Add extension stats
-	for ext, count := range a.extensionMap {
-		metrics = append(metrics, Metric{
+	for i, ext := range exts {
+		metrics[i+metricTotals] = Metric{
 			Name:      "files_by_extension",
-			Value:     count,
+			Key:       ext,
+			Value:     a.extensionMap[ext],
 			Labels:    map[string]string{"extension": ext},
 			Timestamp: now,
-		})
+		}
 	}
 
 	return metrics, nil

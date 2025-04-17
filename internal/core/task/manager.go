@@ -296,7 +296,11 @@ func (m *Manager) runTask(task *repository.Task) {
 		}
 
 		for _, metric := range result.Metrics {
-			logger("Metric: %s = %v", metric.Name, metric.Value)
+			if metric.Key == "" {
+				logger("Metric: %s = %v", metric.Name, metric.Value)
+			} else {
+				logger("Metric: %s [%s] = %v", metric.Name, metric.Key, metric.Value)
+			}
 		}
 	}
 
