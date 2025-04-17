@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/lithammer/shortuuid/v4"
+	"github.com/thushan/inspectre/internal/core/utils"
 	"io"
 	"os"
 	"path/filepath"
@@ -108,31 +109,31 @@ func (m *Manager) ListRepositories() ([]Repository, error) {
 
 // Clone clones a repository to the specified target directory
 func (m *Manager) Clone(repo *Repository, targetDir string) error {
-	// Important: Don't try to remove the directory as it might contain the log file
-	// Instead, make sure the directory is empty or doesn't exist
+	// Check if directory exists
 	fi, err := os.Stat(targetDir)
 	if err == nil {
 		if !fi.IsDir() {
 			return fmt.Errorf("target exists but is not a directory: %s", targetDir)
 		}
 
-		// Check if directory is empty
+		// Directory exists, check if it's empty
 		entries, err := os.ReadDir(targetDir)
 		if err != nil {
 			return fmt.Errorf("failed to read target directory: %w", err)
 		}
 
 		if len(entries) > 0 {
-			// Only clean if not empty, and be careful not to remove log files
-			// Just log a warning
-			fmt.Printf("Warning: Clone directory %s is not empty\n", targetDir)
+			// Not empty, try to clean it safely
+			if err := utils.SafeRemoveAll(targetDir); err != nil {
+				return fmt.Errorf("failed to clean target directory: %w", err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
-		// Some other error occurred
+		// Some error other than "not exists"
 		return fmt.Errorf("failed to check target directory: %w", err)
 	}
 
-	// Create directory if it doesn't exist
+	// Ensure the directory exists (it was either removed or never existed)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory: %w", err)
 	}
@@ -153,6 +154,8 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 
 	_, err = git.PlainClone(targetDir, false, cloneOpts)
 	if err != nil {
+		// Clean up the directory if cloning fails, but don't worry too much about errors
+		_ = utils.SafeRemoveAll(targetDir)
 		return fmt.Errorf("%w: %v", ErrCloneFailure, err)
 	}
 
@@ -160,8 +163,30 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 }
 
 // CleanUp removes the temporary directory
-func (m *Manager) CleanUp(targetDir string) error {
-	return os.RemoveAll(targetDir)
+func (m *Manager) CleanUp(task *Task) error {
+	if task == nil {
+		return errors.New("task cannot be nil")
+	}
+
+	// Close any open files first
+	time.Sleep(100 * time.Millisecond) // Small delay to ensure files are released
+
+	// Try to clean up with retries
+	var lastErr error
+	maxRetries := 3
+
+	for i := 0; i < maxRetries; i++ {
+		err := os.RemoveAll(task.BaseDir)
+		if err == nil {
+			return nil // Successfully removed
+		}
+
+		lastErr = err
+		// Wait a bit longer between retries
+		time.Sleep(500 * time.Millisecond * time.Duration(i+1))
+	}
+
+	return fmt.Errorf("failed to clean up task directory after %d attempts: %w", maxRetries, lastErr)
 }
 
 // getAuthMethod determines the appropriate authentication method
@@ -218,16 +243,26 @@ func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
 		}
 	}
 
-	taskID := shortuuid.NewWithAlphabet("0123456789abcdef") //shortuuid.NewWithNamespace(strings.ToLower(nameOrURL))
-	tempDir := filepath.Join(os.TempDir(), "inspectre", taskID)
+	// Generate task ID
+	taskID := shortuuid.NewWithAlphabet("0123456789abcdef")
+
+	// Create base task directory
+	baseDir := filepath.Join(os.TempDir(), "inspectre", taskID)
+
+	// Create separate subdirectories
+	repoDir := filepath.Join(baseDir, "_repo")         // Repository clone directory
+	assetsDir := filepath.Join(baseDir, "assets")      // Assets and plugin data
+	logFile := filepath.Join(baseDir, "inspectre.log") // Main log file
 
 	return &Task{
 		ID:         taskID,
 		Repository: repo.URL,
 		Status:     "Created",
 		StartTime:  timeNow(),
-		WorkDir:    tempDir,
-		LogFile:    filepath.Join(tempDir, "inspectre.log"),
+		BaseDir:    baseDir,
+		RepoDir:    repoDir,
+		AssetsDir:  assetsDir,
+		LogFile:    logFile,
 	}, nil
 }
 

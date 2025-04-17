@@ -49,7 +49,6 @@ func InsightsCommands() []*cli.Command {
 		},
 	}
 }
-
 func insightsAction(c *cli.Context) error {
 	if err := setup(c.String("config")); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
@@ -69,14 +68,20 @@ func insightsAction(c *cli.Context) error {
 	outputFile := c.String("file")
 	force := c.Bool("force")
 
-	if err := os.MkdirAll(task.WorkDir, 0755); err != nil {
-		return fmt.Errorf("failed to create work directory: %w", err)
+	// Create required directories
+	if err := os.MkdirAll(task.BaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create base directory: %w", err)
 	}
 
-	logPath := filepath.Join(task.WorkDir, "insights.log")
-	logFile, err := os.Create(logPath)
+	if err := os.MkdirAll(task.AssetsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create assets directory: %w", err)
+	}
+
+	// Create insights log file in assets directory
+	insightsLogPath := filepath.Join(task.AssetsDir, "insights.log")
+	logFile, err := os.Create(insightsLogPath)
 	if err != nil {
-		return fmt.Errorf("failed to create log file: %w", err)
+		return fmt.Errorf("failed to create insights log file: %w", err)
 	}
 	defer logFile.Close()
 
@@ -88,7 +93,8 @@ func insightsAction(c *cli.Context) error {
 
 	logger("Starting insights generation for %s", repoArg)
 
-	insightsPath := filepath.Join(task.WorkDir, "insights.json")
+	// Store insights in the assets directory
+	insightsPath := filepath.Join(task.AssetsDir, "insights.json")
 	if !force && utils.FileExists(insightsPath) {
 		logger("Using cached insights from %s", insightsPath)
 		return outputInsights(insightsPath, outputFormat, outputFile)
@@ -101,8 +107,8 @@ func insightsAction(c *cli.Context) error {
 		repoPath = repoArg
 		logger("Using local repository at %s", repoPath)
 	} else {
-		// Clone the repository
-		logger("Cloning repository %s to %s", repoArg, task.WorkDir)
+		// Clone the repository to the repo directory
+		logger("Cloning repository %s to %s", repoArg, task.RepoDir)
 
 		var repo *repository.Repository
 		isURL := strings.HasPrefix(repoArg, "http") || strings.HasPrefix(repoArg, "git@")
@@ -120,19 +126,26 @@ func insightsAction(c *cli.Context) error {
 			}
 		}
 
-		err = repoManager.Clone(repo, task.WorkDir)
+		// Create repo directory if it doesn't exist
+		if err := os.MkdirAll(task.RepoDir, 0755); err != nil {
+			return fmt.Errorf("failed to create repository directory: %w", err)
+		}
+
+		err = repoManager.Clone(repo, task.RepoDir)
 		if err != nil {
 			return fmt.Errorf("failed to clone repository: %w", err)
 		}
 
-		repoPath = task.WorkDir
+		repoPath = task.RepoDir
 		logger("Repository cloned successfully to %s", repoPath)
 	}
 
 	logger("Initializing LLM analyser")
 	llmAnalyser := analysis.NewLLMAnalyser()
 
-	err = llmAnalyser.Initialize(repoPath, map[string]string{})
+	err = llmAnalyser.Initialize(repoPath, map[string]string{
+		"ASSETS_DIR": task.AssetsDir, // Pass assets directory to the analyser
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize LLM analyser: %w", err)
 	}

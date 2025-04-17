@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -82,9 +81,17 @@ func (m *Manager) StartTask(taskID string) error {
 	task.Status = StatusRunning
 	m.tasksMu.Unlock()
 
-	// Setup log file
-	if err := os.MkdirAll(task.WorkDir, 0755); err != nil {
-		return fmt.Errorf("failed to create work directory: %w", err)
+	// Create required directories
+	if err := os.MkdirAll(task.BaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create base directory: %w", err)
+	}
+
+	if err := os.MkdirAll(task.RepoDir, 0755); err != nil {
+		return fmt.Errorf("failed to create repository directory: %w", err)
+	}
+
+	if err := os.MkdirAll(task.AssetsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create assets directory: %w", err)
 	}
 
 	logFile, err := os.OpenFile(task.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -96,7 +103,6 @@ func (m *Manager) StartTask(taskID string) error {
 	m.logWriters[taskID] = logFile
 	m.logMu.Unlock()
 
-	// Run in goroutine
 	go func() {
 		m.runTask(task)
 	}()
@@ -170,6 +176,24 @@ func (m *Manager) GetLogReader(taskID string) (io.ReadCloser, error) {
 
 	return file, nil
 }
+func (m *Manager) CleanupTask(taskID string) error {
+	m.tasksMu.RLock()
+	task, exists := m.tasks[taskID]
+	m.tasksMu.RUnlock()
+
+	if !exists {
+		return ErrTaskNotFound
+	}
+
+	// Make sure any log files are closed first
+	m.CloseTaskLog(taskID)
+
+	// Wait a bit to ensure all file handles are released
+	time.Sleep(100 * time.Millisecond)
+
+	// Use repo manager to clean up
+	return m.repoManager.CleanUp(task)
+}
 
 // CloseTaskLog closes the log file for a task
 func (m *Manager) CloseTaskLog(taskID string) {
@@ -211,16 +235,9 @@ func (m *Manager) runTask(task *repository.Task) {
 		}
 	}
 
-	// IMPORTANT: Create clone directory separately from log directory
-	cloneDir := filepath.Join(filepath.Dir(task.WorkDir), "repo-"+task.ID)
-	if err := os.MkdirAll(cloneDir, 0755); err != nil {
-		m.markTaskFailed(task, fmt.Sprintf("Failed to create clone directory: %v", err))
-		return
-	}
-
-	// Clone the repository to a separate directory
-	logger("Cloning repository %s to %s", repo.URL, cloneDir)
-	err = m.repoManager.Clone(repo, cloneDir)
+	// Clone the repository to the repo directory
+	logger("Cloning repository %s to %s", repo.URL, task.RepoDir)
+	err = m.repoManager.Clone(repo, task.RepoDir)
 	if err != nil {
 		m.markTaskFailed(task, fmt.Sprintf("Failed to clone repository: %v", err))
 		return
@@ -257,10 +274,12 @@ func (m *Manager) runTask(task *repository.Task) {
 		"REPOSITORY_URL":  repo.URL,
 		"REPOSITORY_TYPE": repo.Type,
 		"TASK_ID":         task.ID,
+		"ASSETS_DIR":      task.AssetsDir, // Add assets dir to environment
 	}
 
 	logger("Running analysers on repository...")
-	results, err := analyserManager.AnalyseRepository(task.WorkDir, env)
+	// Use repo directory instead of work directory
+	results, err := analyserManager.AnalyseRepository(task.RepoDir, env)
 	if err != nil {
 		m.markTaskFailed(task, fmt.Sprintf("Analysis failed: %v", err))
 		return
