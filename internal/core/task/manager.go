@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -86,7 +87,7 @@ func (m *Manager) StartTask(taskID string) error {
 		return fmt.Errorf("failed to create work directory: %w", err)
 	}
 
-	logFile, err := os.Create(task.LogFile)
+	logFile, err := os.OpenFile(task.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create log file: %w", err)
 	}
@@ -162,7 +163,12 @@ func (m *Manager) GetLogReader(taskID string) (io.ReadCloser, error) {
 		return nil, ErrTaskNotFound
 	}
 
-	return os.Open(task.LogFile)
+	file, err := os.OpenFile(task.LogFile, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+
+	return file, nil
 }
 
 // CloseTaskLog closes the log file for a task
@@ -205,9 +211,16 @@ func (m *Manager) runTask(task *repository.Task) {
 		}
 	}
 
-	// Clone the repository
-	logger("Cloning repository %s to %s", repo.URL, task.WorkDir)
-	err = m.repoManager.Clone(repo, task.WorkDir)
+	// IMPORTANT: Create clone directory separately from log directory
+	cloneDir := filepath.Join(filepath.Dir(task.WorkDir), "repo-"+task.ID)
+	if err := os.MkdirAll(cloneDir, 0755); err != nil {
+		m.markTaskFailed(task, fmt.Sprintf("Failed to create clone directory: %v", err))
+		return
+	}
+
+	// Clone the repository to a separate directory
+	logger("Cloning repository %s to %s", repo.URL, cloneDir)
+	err = m.repoManager.Clone(repo, cloneDir)
 	if err != nil {
 		m.markTaskFailed(task, fmt.Sprintf("Failed to clone repository: %v", err))
 		return

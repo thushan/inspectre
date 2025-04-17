@@ -108,6 +108,31 @@ func (m *Manager) ListRepositories() ([]Repository, error) {
 
 // Clone clones a repository to the specified target directory
 func (m *Manager) Clone(repo *Repository, targetDir string) error {
+	// Important: Don't try to remove the directory as it might contain the log file
+	// Instead, make sure the directory is empty or doesn't exist
+	fi, err := os.Stat(targetDir)
+	if err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("target exists but is not a directory: %s", targetDir)
+		}
+
+		// Check if directory is empty
+		entries, err := os.ReadDir(targetDir)
+		if err != nil {
+			return fmt.Errorf("failed to read target directory: %w", err)
+		}
+
+		if len(entries) > 0 {
+			// Only clean if not empty, and be careful not to remove log files
+			// Just log a warning
+			fmt.Printf("Warning: Clone directory %s is not empty\n", targetDir)
+		}
+	} else if !os.IsNotExist(err) {
+		// Some other error occurred
+		return fmt.Errorf("failed to check target directory: %w", err)
+	}
+
+	// Create directory if it doesn't exist
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create target directory: %w", err)
 	}
@@ -122,7 +147,6 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		Progress: os.Stdout,
 	}
 
-	// Only set Auth if it's not nil
 	if auth != nil {
 		cloneOpts.Auth = auth
 	}
