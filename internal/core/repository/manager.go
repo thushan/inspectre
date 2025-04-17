@@ -117,12 +117,17 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		return err
 	}
 
-	_, err = git.PlainClone(targetDir, false, &git.CloneOptions{
+	cloneOpts := &git.CloneOptions{
 		URL:      repo.URL,
 		Progress: os.Stdout,
-		Auth:     auth,
-	})
+	}
 
+	// Only set Auth if it's not nil
+	if auth != nil {
+		cloneOpts.Auth = auth
+	}
+
+	_, err = git.PlainClone(targetDir, false, cloneOpts)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCloneFailure, err)
 	}
@@ -150,6 +155,8 @@ func (m *Manager) getAuthMethod(repo *Repository) (transport.AuthMethod, error) 
 				Password: repo.Auth.Password,
 			}, nil
 		}
+		// This is for public repositories
+		return nil, nil
 	case "bitbucket":
 		if repo.Auth.Username != "" && repo.Auth.Password != "" {
 			return &http.BasicAuth{
@@ -162,11 +169,11 @@ func (m *Manager) getAuthMethod(repo *Repository) (transport.AuthMethod, error) 
 				Password: repo.Auth.Token,
 			}, nil
 		}
+		// This is for public repositories
+		return nil, nil
 	default:
 		return nil, ErrUnsupportedRepoType
 	}
-
-	return nil, ErrMissingAuthentication
 }
 
 // CreateTask creates a new analysis task

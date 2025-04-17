@@ -186,6 +186,7 @@ func (m *Manager) runTask(task *repository.Task) {
 		repo = &repository.Repository{
 			URL:  task.Repository,
 			Type: repository.GuessRepoType(task.Repository),
+			Auth: repository.Auth{},
 		}
 	}
 
