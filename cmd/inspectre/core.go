@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/pterm/pterm"
-	"github.com/thushan/inspectre/internal/core/logging"
-	"github.com/thushan/inspectre/internal/core/types"
 	"github.com/urfave/cli/v2"
 )
 

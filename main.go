@@ -1,13 +1,12 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"os"
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/pterm/pterm"
 	commands "github.com/thushan/inspectre/cmd/inspectre"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"

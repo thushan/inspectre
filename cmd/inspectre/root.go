@@ -1,8 +1,6 @@
 package commands
 
 import (
-	"os"
-
 	"github.com/pterm/pterm"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"
@@ -10,6 +8,7 @@ import (
 	"github.com/thushan/inspectre/internal/core/ui"
 	"github.com/thushan/inspectre/internal/version"
 	"github.com/urfave/cli/v2"
+	"sort"
 )
 
 var (
@@ -104,8 +103,13 @@ func NewApp(appCtx *appctx.AppContext) *cli.App {
 	return app
 }
 
+// sortCommands sorts commands in place by name
 func sortCommands(commands []*cli.Command) {
-	cli.CommandsByName(commands).Sort()
+	sort.Slice(commands, func(i, j int) bool {
+		return commands[i].Name < commands[j].Name
+	})
+
+	// Sort subcommands recursively
 	for _, command := range commands {
 		if len(command.Subcommands) > 0 {
 			sortCommands(command.Subcommands)

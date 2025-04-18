@@ -17,6 +17,9 @@ type DisplayProvider interface {
 	ShowError(message string)
 	Confirm(message string) bool
 	ShowResults(results []*analysis.Result)
+	ShowHeader(title string)
+	ShowTaskInfo(task *Task)
+	PrintResultTable(headers []string, rows [][]string)
 }
 
 // SpinnerProvider defines the interface for spinner operations
