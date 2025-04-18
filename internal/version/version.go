@@ -3,7 +3,6 @@ package version
 import (
 	"fmt"
 	"log"
-	"time"
 )
 
 var (
@@ -12,7 +11,7 @@ var (
 	Description = "A code analysis tool to inspect repositories"
 	Version     = "v2.0.25"
 	Commit      = "none"
-	Date        = time.Now()
+	Date        = "nowish"
 	User        = "local"
 )
 

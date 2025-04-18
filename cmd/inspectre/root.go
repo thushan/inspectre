@@ -1,6 +1,9 @@
 package commands
 
 import (
+	"sort"
+	"time"
+
 	"github.com/pterm/pterm"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"
@@ -8,7 +11,6 @@ import (
 	"github.com/thushan/inspectre/internal/core/ui"
 	"github.com/thushan/inspectre/internal/version"
 	"github.com/urfave/cli/v2"
-	"sort"
 )
 
 var (
@@ -32,7 +34,7 @@ var (
 	verboseFlag = &cli.BoolFlag{
 		Name:    "verbose",
 		Usage:   "Verbose output",
-		Aliases: []string{"v"},
+		Aliases: []string{"vv"}, // Changed from "v" to "vv" to avoid conflict with version flag
 		EnvVars: []string{"VERBOSE", "INSPECTRE_VERBOSE"},
 	}
 
@@ -63,7 +65,7 @@ func NewApp(appCtx *appctx.AppContext) *cli.App {
 		Name:                 version.Name,
 		Usage:                version.Description,
 		Version:              version.Version,
-		Compiled:             version.Date,
+		Compiled:             time.Now(),
 		EnableBashCompletion: true,
 		Authors: []*cli.Author{
 			{
