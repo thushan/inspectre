@@ -39,6 +39,7 @@ type TaskManager interface {
 	ListTasks(showAll, showFailed bool) []*Task
 	GetLogReader(taskID string) (io.ReadCloser, error)
 	CancelTask(taskID string) error
+	SetDisplay(display DisplayProvider)
 }
 
 // RepositoryManager defines the interface for repository operations
@@ -47,6 +48,8 @@ type RepositoryManager interface {
 	ListRepositories() ([]Repository, error)
 	Clone(repo *Repository, targetDir string) error
 	CleanUp(task *Task) error
+	SetDisplay(display DisplayProvider)
+	CreateTask(nameOrURL string) (*Task, error)
 }
 
 // Task represents a running analysis task

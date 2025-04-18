@@ -17,6 +17,7 @@ import (
 )
 
 func main() {
+	showLogo()
 	// Extend GOMAXPROCS to better utilize cores but avoid overwhelming the system
 	// Use at least 4 for background tasks even on smaller machines
 	minProcs := 4
@@ -67,7 +68,6 @@ func main() {
 
 	// Show logo before command runs
 	app.Before = func(c *cli.Context) error {
-		showLogo()
 		return nil
 	}
 
