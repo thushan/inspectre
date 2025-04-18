@@ -1,4 +1,3 @@
-// internal/core/ui/display.go - Corrected version
 package ui
 
 import (
@@ -15,6 +14,13 @@ import (
 
 // UI display constants
 const (
+	// Channel buffer sizes
+	EventChannelSize = 100
+
+	// Wait timeouts
+	ShutdownTimeout = 500 * time.Millisecond
+	EventTimeout    = 50 * time.Millisecond
+
 	// Progress bar styles
 	ProgressBarWidth = 40
 
@@ -28,6 +34,25 @@ const (
 	SymbolCheck = "✓"
 	SymbolCross = "✗"
 	SymbolInfo  = "ℹ"
+
+	// Event types
+	EventSpinnerStart   = "spinner_start"
+	EventSpinnerUpdate  = "spinner_update"
+	EventSpinnerStop    = "spinner_stop"
+	EventSpinnerSuccess = "spinner_success"
+	EventSpinnerFail    = "spinner_fail"
+	EventSpinnerWarning = "spinner_warning"
+	EventProgressStart  = "progress_start"
+	EventProgressUpdate = "progress_update"
+	EventProgressStop   = "progress_stop"
+	EventShowSuccess    = "show_success"
+	EventShowInfo       = "show_info"
+	EventShowWarning    = "show_warning"
+	EventShowError      = "show_error"
+	EventShowHeader     = "show_header"
+	EventShowResults    = "show_results"
+	EventShowTaskInfo   = "show_task_info"
+	EventPrintTable     = "print_table"
 )
 
 // DisplayOptions represents display options
@@ -81,7 +106,7 @@ func NewDisplay(options DisplayOptions) *Display {
 
 	d := &Display{
 		options:   options,
-		eventChan: make(chan UIEvent, 100),
+		eventChan: make(chan UIEvent, EventChannelSize),
 		ctx:       ctx,
 		cancel:    cancel,
 		closed:    false,
@@ -121,65 +146,65 @@ func (d *Display) startEventHandler() {
 // handleEvent processes a UI event
 func (d *Display) handleEvent(event UIEvent) {
 	switch event.Type {
-	case "spinner_start":
+	case EventSpinnerStart:
 		d.startSpinnerInternal(event.Message)
 
-	case "spinner_update":
+	case EventSpinnerUpdate:
 		d.updateSpinnerTextInternal(event.Message)
 
-	case "spinner_stop":
+	case EventSpinnerStop:
 		d.stopSpinnerInternal(event.Message)
 
-	case "spinner_success":
+	case EventSpinnerSuccess:
 		d.successSpinnerInternal(event.Message)
 
-	case "spinner_fail":
+	case EventSpinnerFail:
 		d.failSpinnerInternal(event.Message)
 
-	case "spinner_warning":
+	case EventSpinnerWarning:
 		d.warningSpinnerInternal(event.Message)
 
-	case "progress_start":
+	case EventProgressStart:
 		if progress, ok := event.Data.(map[string]interface{}); ok {
 			total := int(progress["total"].(float64))
 			title := progress["title"].(string)
 			d.startProgressInternal(total, title)
 		}
 
-	case "progress_update":
+	case EventProgressUpdate:
 		if value, ok := event.Data.(float64); ok {
 			d.updateProgressInternal(int(value))
 		}
 
-	case "progress_stop":
+	case EventProgressStop:
 		d.stopProgressInternal()
 
-	case "show_success":
+	case EventShowSuccess:
 		d.showSuccessInternal(event.Message)
 
-	case "show_info":
+	case EventShowInfo:
 		d.showInfoInternal(event.Message)
 
-	case "show_warning":
+	case EventShowWarning:
 		d.showWarningInternal(event.Message)
 
-	case "show_error":
+	case EventShowError:
 		d.showErrorInternal(event.Message)
 
-	case "show_header":
+	case EventShowHeader:
 		d.showHeaderInternal(event.Message)
 
-	case "show_results":
+	case EventShowResults:
 		if results, ok := event.Data.([]*analysis.Result); ok {
 			d.showResultsInternal(results)
 		}
 
-	case "show_task_info":
+	case EventShowTaskInfo:
 		if task, ok := event.Data.(*types.Task); ok {
 			d.showTaskInfoInternal(task)
 		}
 
-	case "print_table":
+	case EventPrintTable:
 		if tableData, ok := event.Data.(map[string]interface{}); ok {
 			headers := tableData["headers"].([]string)
 			rows := tableData["rows"].([][]string)
@@ -188,7 +213,7 @@ func (d *Display) handleEvent(event UIEvent) {
 	}
 }
 
-// queueEvent adds an event to the processing queue
+// queueEvent adds an event to the processing queue with timeout
 func (d *Display) queueEvent(eventType, message string, data interface{}) {
 	// Check if display is closed
 	d.closedMu.RLock()
@@ -207,16 +232,16 @@ func (d *Display) queueEvent(eventType, message string, data interface{}) {
 		Timestamp: time.Now(),
 	}
 
-	// Try to send event to channel (non-blocking)
+	// Try to send event to channel with timeout
 	select {
 	case d.eventChan <- event:
-		// Event sent
+		// Event sent successfully
 	case <-d.ctx.Done():
 		// Context cancelled
-	default:
-		// Channel full, log this
+	case <-time.After(EventTimeout):
+		// Timeout - log dropped event
 		logger := logging.GetLogger()
-		logger.Warning("UI event channel full, dropped event: %s", eventType)
+		logger.Warning("UI event channel blocked, dropped event: %s", eventType)
 	}
 }
 
@@ -252,8 +277,21 @@ func (d *Display) Close() {
 	// Close event channel
 	close(d.eventChan)
 
-	// Wait for event handler to finish
-	d.wg.Wait()
+	// Wait for event handler to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		d.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Handler exited cleanly
+	case <-time.After(ShutdownTimeout):
+		// Timeout - log warning
+		logger := logging.GetLogger()
+		logger.Warning("Display manager shutdown timed out waiting for event handler")
+	}
 }
 
 // ShowLogo displays the Inspectre logo
@@ -274,53 +312,53 @@ func (d *Display) ShowLogo() {
 
 // StartSpinner starts a spinner
 func (d *Display) StartSpinner(text string) types.SpinnerProvider {
-	d.queueEvent("spinner_start", text, nil)
+	d.queueEvent(EventSpinnerStart, text, nil)
 	return &SpinnerAdapter{display: d}
 }
 
 // UpdateSpinnerText updates the spinner text
 func (d *Display) UpdateSpinnerText(text string) {
-	d.queueEvent("spinner_update", text, nil)
+	d.queueEvent(EventSpinnerUpdate, text, nil)
 }
 
 // StopSpinner stops the spinner
 func (d *Display) StopSpinner(text string) {
-	d.queueEvent("spinner_stop", text, nil)
+	d.queueEvent(EventSpinnerStop, text, nil)
 }
 
 // ShowHeader displays a section header
 func (d *Display) ShowHeader(title string) {
-	d.queueEvent("show_header", title, nil)
+	d.queueEvent(EventShowHeader, title, nil)
 }
 
 // ShowTaskInfo displays task information
 func (d *Display) ShowTaskInfo(task *types.Task) {
-	d.queueEvent("show_task_info", "", task)
+	d.queueEvent(EventShowTaskInfo, "", task)
 }
 
 // ShowResults displays analysis results
 func (d *Display) ShowResults(results []*analysis.Result) {
-	d.queueEvent("show_results", "", results)
+	d.queueEvent(EventShowResults, "", results)
 }
 
 // ShowSuccess displays a success message
 func (d *Display) ShowSuccess(message string) {
-	d.queueEvent("show_success", message, nil)
+	d.queueEvent(EventShowSuccess, message, nil)
 }
 
 // ShowInfo displays an informational message
 func (d *Display) ShowInfo(message string) {
-	d.queueEvent("show_info", message, nil)
+	d.queueEvent(EventShowInfo, message, nil)
 }
 
 // ShowWarning displays a warning message
 func (d *Display) ShowWarning(message string) {
-	d.queueEvent("show_warning", message, nil)
+	d.queueEvent(EventShowWarning, message, nil)
 }
 
 // ShowError displays an error message
 func (d *Display) ShowError(message string) {
-	d.queueEvent("show_error", message, nil)
+	d.queueEvent(EventShowError, message, nil)
 }
 
 // PrintResultTable prints a table of results
@@ -329,7 +367,7 @@ func (d *Display) PrintResultTable(headers []string, rows [][]string) {
 		"headers": headers,
 		"rows":    rows,
 	}
-	d.queueEvent("print_table", "", tableData)
+	d.queueEvent(EventPrintTable, "", tableData)
 }
 
 // Confirm asks the user for confirmation
@@ -630,17 +668,17 @@ func (s *SpinnerAdapter) UpdateText(text string) {
 }
 
 func (s *SpinnerAdapter) Success(text string) {
-	s.display.queueEvent("spinner_success", text, nil)
+	s.display.queueEvent(EventSpinnerSuccess, text, nil)
 }
 
 func (s *SpinnerAdapter) Fail(text string) {
-	s.display.queueEvent("spinner_fail", text, nil)
+	s.display.queueEvent(EventSpinnerFail, text, nil)
 }
 
 func (s *SpinnerAdapter) Warning(text string) {
-	s.display.queueEvent("spinner_warning", text, nil)
+	s.display.queueEvent(EventSpinnerWarning, text, nil)
 }
 
 func (s *SpinnerAdapter) Info(text string) {
-	s.display.queueEvent("spinner_stop", text, nil)
+	s.display.queueEvent(EventSpinnerStop, text, nil)
 }

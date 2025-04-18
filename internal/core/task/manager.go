@@ -1,4 +1,3 @@
-// internal/core/task/manager.go - Fixed version
 package task
 
 import (
@@ -29,11 +28,23 @@ const (
 	StatusCompleted = "Completed"
 	StatusFailed    = "Failed"
 	StatusCancelled = "Cancelled"
-)
 
-// Default concurrency settings
-const (
-	DefaultWorkerCount = 2
+	// Concurrency settings
+	MinWorkerCount = 2
+	MaxWorkerCount = 8
+
+	// Channel buffer sizes
+	TaskQueueSize  = 100
+	TaskResultSize = 100
+	UIEventSize    = 100
+
+	// Timeouts
+	TaskExecutionTimeout = 30 * time.Minute
+	CloneTimeout         = 10 * time.Minute
+
+	// Worker scaling
+	WorkerScaleInterval = 5 * time.Second
+	IdleWorkerTimeout   = 30 * time.Second
 )
 
 var (
@@ -61,6 +72,15 @@ type TaskResult struct {
 	CompletedAt time.Time
 }
 
+// WorkerState tracks the state of a worker
+type WorkerState struct {
+	ID        int
+	IsIdle    bool
+	LastUsed  time.Time
+	TaskCount int
+	Cancel    context.CancelFunc
+}
+
 // Manager handles analysis tasks
 type Manager struct {
 	repoManager      *repository.Manager
@@ -74,19 +94,22 @@ type Manager struct {
 	display          types.DisplayProvider
 
 	// Worker pool related fields
-	taskQueue   chan *types.Task
-	taskResults chan TaskResult
-	uiEvents    chan UIEvent
-	workers     []context.CancelFunc
+	taskQueue    chan *types.Task
+	taskResults  chan TaskResult
+	uiEvents     chan UIEvent
+	workerStates map[int]*WorkerState
+	workersMu    sync.RWMutex
 
 	// Shutdown coordination
 	shutdownOnce sync.Once
 	wg           sync.WaitGroup
 
 	// Configuration
-	workerCount int
-	closed      bool
-	closedMu    sync.RWMutex
+	minWorkerCount int
+	maxWorkerCount int
+	currentWorkers int
+	closed         bool
+	closedMu       sync.RWMutex
 }
 
 // NewManager creates a new task manager
@@ -94,13 +117,20 @@ func NewManager(repoManager *repository.Manager, storageManager *storage.Manager
 	// Create contexts for the manager and worker pool
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Set default worker count based on number of CPU cores, but not less than 1
-	workerCount := runtime.NumCPU()
-	if workerCount > DefaultWorkerCount {
-		workerCount = DefaultWorkerCount
+	// Set worker count based on number of CPU cores, with reasonable limits
+	cpuCount := runtime.NumCPU()
+	minWorkers := MinWorkerCount
+	if cpuCount < minWorkers {
+		minWorkers = cpuCount
 	}
-	if workerCount < 1 {
-		workerCount = 1
+
+	maxWorkers := MaxWorkerCount
+	if cpuCount < maxWorkers {
+		maxWorkers = cpuCount
+	}
+
+	if minWorkers < 1 {
+		minWorkers = 1
 	}
 
 	manager := &Manager{
@@ -113,42 +143,142 @@ func NewManager(repoManager *repository.Manager, storageManager *storage.Manager
 		logger:           logging.GetLogger(),
 
 		// Channels sized to avoid blocking in normal scenarios
-		taskQueue:   make(chan *types.Task, 100),
-		taskResults: make(chan TaskResult, 100),
-		uiEvents:    make(chan UIEvent, 100),
+		taskQueue:    make(chan *types.Task, TaskQueueSize),
+		taskResults:  make(chan TaskResult, TaskResultSize),
+		uiEvents:     make(chan UIEvent, UIEventSize),
+		workerStates: make(map[int]*WorkerState),
 
-		workers:     make([]context.CancelFunc, 0, workerCount),
-		workerCount: workerCount,
-		closed:      false,
+		minWorkerCount: minWorkers,
+		maxWorkerCount: maxWorkers,
+		currentWorkers: 0,
+		closed:         false,
 	}
 
 	// Start background workers
 	manager.startWorkers()
+
+	// Start worker scaling goroutine
+	manager.startWorkerScaling()
 
 	// Handle task results and UI events
 	manager.startEventHandlers()
 
 	// Register shutdown hook if app context is provided
 	if appCtx != nil {
-		appCtx.AddShutdownHook(manager.Shutdown)
+		appCtx.AddShutdownHookWithPriority(
+			"taskmanager.shutdown",
+			appctx.PriorityNormal,
+			manager.Shutdown,
+		)
 	}
 
 	return manager
 }
 
-// startWorkers initializes and starts the worker pool
+// startWorkers initializes and starts the initial worker pool
 func (m *Manager) startWorkers() {
-	// Start worker goroutines
-	for i := 0; i < m.workerCount; i++ {
-		workerCtx, workerCancel := context.WithCancel(m.ctx)
-		m.workers = append(m.workers, workerCancel)
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
 
-		workerId := i
-		m.wg.Add(1)
-		go func() {
-			defer m.wg.Done()
-			m.workerLoop(workerCtx, workerId)
-		}()
+	// Start initial set of workers
+	for i := 0; i < m.minWorkerCount; i++ {
+		m.startWorker()
+	}
+}
+
+// startWorker launches a new worker goroutine
+func (m *Manager) startWorker() {
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
+
+	workerID := m.currentWorkers
+	workerCtx, workerCancel := context.WithCancel(m.ctx)
+
+	m.workerStates[workerID] = &WorkerState{
+		ID:        workerID,
+		IsIdle:    true,
+		LastUsed:  time.Now(),
+		TaskCount: 0,
+		Cancel:    workerCancel,
+	}
+
+	m.currentWorkers++
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.workerLoop(workerCtx, workerID)
+
+		// Worker is exiting, clean up its state
+		m.workersMu.Lock()
+		delete(m.workerStates, workerID)
+		m.currentWorkers--
+		m.workersMu.Unlock()
+	}()
+
+	m.logger.Debug("Worker %d started", workerID)
+}
+
+// startWorkerScaling starts the worker scaling goroutine
+func (m *Manager) startWorkerScaling() {
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+
+		ticker := time.NewTicker(WorkerScaleInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-ticker.C:
+				m.scaleWorkers()
+			}
+		}
+	}()
+}
+
+// scaleWorkers adjusts the number of workers based on load
+func (m *Manager) scaleWorkers() {
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
+
+	// Count idle workers and identify idle ones to potentially terminate
+	idleCount := 0
+	busyCount := 0
+
+	now := time.Now()
+	var idleTooLong []int
+
+	for id, state := range m.workerStates {
+		if state.IsIdle {
+			idleCount++
+			idleTime := now.Sub(state.LastUsed)
+
+			// If worker has been idle for too long and we're above min count, mark for removal
+			if idleTime > IdleWorkerTimeout && m.currentWorkers > m.minWorkerCount {
+				idleTooLong = append(idleTooLong, id)
+			}
+		} else {
+			busyCount++
+		}
+	}
+
+	// Check if we need to scale up (all workers are busy)
+	if idleCount == 0 && m.currentWorkers < m.maxWorkerCount {
+		m.logger.Debug("Scaling up workers: %d -> %d", m.currentWorkers, m.currentWorkers+1)
+		m.workersMu.Unlock()
+		m.startWorker()
+		m.workersMu.Lock()
+	}
+
+	// Scale down by terminating idle workers if we have too many
+	for _, id := range idleTooLong {
+		if worker, exists := m.workerStates[id]; exists && m.currentWorkers > m.minWorkerCount {
+			m.logger.Debug("Scaling down: terminating idle worker %d", id)
+			worker.Cancel()
+		}
 	}
 }
 
@@ -194,6 +324,9 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 	m.logger.Debug("Worker %d started", workerID)
 
 	for {
+		// Mark worker as idle while waiting for a task
+		m.setWorkerIdle(workerID, true)
+
 		select {
 		case <-ctx.Done():
 			m.logger.Debug("Worker %d shutting down: %v", workerID, ctx.Err())
@@ -205,6 +338,9 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 				m.logger.Debug("Worker %d exiting: task queue closed", workerID)
 				return
 			}
+
+			// Mark worker as busy
+			m.setWorkerIdle(workerID, false)
 
 			// Check if this worker should handle this task
 			m.tasksMu.Lock()
@@ -232,6 +368,14 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 			// Execute the task
 			result := m.executeTask(task)
 
+			// Update worker state
+			m.workersMu.Lock()
+			if state, exists := m.workerStates[workerID]; exists {
+				state.TaskCount++
+				state.LastUsed = time.Now()
+			}
+			m.workersMu.Unlock()
+
 			// Send result for processing
 			select {
 			case m.taskResults <- result:
@@ -244,10 +388,23 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 	}
 }
 
+// setWorkerIdle updates the worker's idle state
+func (m *Manager) setWorkerIdle(workerID int, idle bool) {
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
+
+	if state, exists := m.workerStates[workerID]; exists {
+		state.IsIdle = idle
+		if idle {
+			state.LastUsed = time.Now()
+		}
+	}
+}
+
 // executeTask performs the actual repository analysis
 func (m *Manager) executeTask(task *types.Task) TaskResult {
 	// Create task-specific context that can be cancelled
-	taskCtx, taskCancel := context.WithCancel(m.ctx)
+	taskCtx, taskCancel := context.WithTimeout(m.ctx, TaskExecutionTimeout)
 	defer taskCancel()
 
 	result := TaskResult{
@@ -710,12 +867,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		m.closedMu.Unlock()
 
 		// Cancel all workers
-		for _, cancel := range m.workers {
-			cancel()
+		m.workersMu.Lock()
+		for _, worker := range m.workerStates {
+			worker.Cancel()
 		}
-
-		// Close the task queue to signal workers to exit after processing current tasks
-		close(m.taskQueue)
+		m.workersMu.Unlock()
 
 		// Cancel main context after a short delay to allow for cleanup
 		time.AfterFunc(100*time.Millisecond, func() {
@@ -733,8 +889,13 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		}
 		m.tasksMu.Unlock()
 
-		// Close UI events channel after a delay
+		// Close channels in the correct order
+		// First stop accepting new tasks
+		close(m.taskQueue)
+
+		// Give time for any pending results to be processed
 		time.AfterFunc(200*time.Millisecond, func() {
+			close(m.taskResults)
 			close(m.uiEvents)
 		})
 	})
@@ -771,9 +932,21 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// Constants for URL validation
+const (
+	HTTPPrefix  = "http://"
+	HTTPSPrefix = "https://"
+	SSHPrefix   = "git@"
+
+	// Minimum URL length to check prefixes
+	MinURLLength = 5
+)
+
 // isURLString checks if a string is a URL
 func isURLString(s string) bool {
-	return s != "" && (len(s) > 4) && (strings.HasPrefix(s, "http://") ||
-		strings.HasPrefix(s, "https://") ||
-		strings.HasPrefix(s, "git@"))
+	return s != "" &&
+		len(s) >= MinURLLength &&
+		(strings.HasPrefix(s, HTTPPrefix) ||
+			strings.HasPrefix(s, HTTPSPrefix) ||
+			strings.HasPrefix(s, SSHPrefix))
 }

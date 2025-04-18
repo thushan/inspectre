@@ -6,8 +6,43 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
+
+// File size constants
+const (
+	KB = 1024
+	MB = 1024 * KB
+	GB = 1024 * MB
+
+	// Common exclude directories
+	GitDir         = ".git"
+	NodeModulesDir = "node_modules"
+	VendorDir      = "vendor"
+	IDEADir        = ".idea"
+	VSCodeDir      = ".vscode"
+
+	// Worker count for parallel processing
+	FileWorkerCount = 4
+
+	// Buffer sizes for channels
+	FileChannelSize = 1000
+
+	// Batch size for file operations
+	FileBatchSize = 100
+)
+
+// DefaultExcludeDirs contains default directories to exclude from analysis
+var DefaultExcludeDirs = []string{GitDir, NodeModulesDir, VendorDir, IDEADir, VSCodeDir}
+
+// FileInfo contains information about a file
+type FileInfo struct {
+	Path      string
+	Size      int64
+	Extension string
+	IsDir     bool
+}
 
 // FileAnalyser counts files by extension and provides basic stats
 type FileAnalyser struct {
@@ -19,12 +54,13 @@ type FileAnalyser struct {
 	largestFile  string
 	largestSize  int64
 	extensionMap map[string]int
+	resultsMu    sync.Mutex
 }
 
 // NewFileAnalyser creates a new file analyser
 func NewFileAnalyser() *FileAnalyser {
 	return &FileAnalyser{
-		excludeDirs:  []string{".git", "node_modules", "vendor", ".idea", ".vscode"},
+		excludeDirs:  DefaultExcludeDirs,
 		fileStats:    make(map[string]int),
 		extensionMap: make(map[string]int),
 	}
@@ -47,10 +83,51 @@ func (a *FileAnalyser) Initialize(repoPath string, env map[string]string) error 
 	return nil
 }
 
-// Run performs the analysis
+// Run performs the analysis with parallelization
 func (a *FileAnalyser) Run() ([]Metric, error) {
-	// Walk the repository and gather file information
-	err := filepath.Walk(a.repoPath, func(path string, info os.FileInfo, err error) error {
+	// Create channels for worker pool
+	filesChan := make(chan FileInfo, FileChannelSize)
+	resultsChan := make(chan error, FileWorkerCount)
+
+	// Start worker pool
+	var wg sync.WaitGroup
+
+	// Start consumers
+	for i := 0; i < FileWorkerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.processFiles(filesChan)
+		}()
+	}
+
+	// Start producer
+	go func() {
+		defer close(filesChan)
+		err := a.walkRepository(filesChan)
+		if err != nil {
+			resultsChan <- fmt.Errorf("failed to walk repository: %w", err)
+		}
+	}()
+
+	// Wait for workers to finish
+	wg.Wait()
+	close(resultsChan)
+
+	// Check for errors
+	for err := range resultsChan {
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Build metrics from results
+	return a.buildMetrics(), nil
+}
+
+// walkRepository traverses the repository and sends file info to the channel
+func (a *FileAnalyser) walkRepository(filesChan chan<- FileInfo) error {
+	return filepath.Walk(a.repoPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -72,29 +149,81 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 		}
 
 		// Process file
-		a.totalFiles++
-		a.totalSize += info.Size()
-
-		// Track largest file
-		if info.Size() > a.largestSize {
-			a.largestSize = info.Size()
-			a.largestFile, _ = filepath.Rel(a.repoPath, path)
-		}
-
-		// Get file extension
 		ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 		if ext == "" {
 			ext = "(none)"
 		}
-		a.extensionMap[ext]++
+
+		// Send file info to channel
+		filesChan <- FileInfo{
+			Path:      path,
+			Size:      info.Size(),
+			Extension: ext,
+			IsDir:     false,
+		}
 
 		return nil
 	})
+}
 
-	if err != nil {
-		return nil, fmt.Errorf("file analysis failed: %w", err)
+// processFiles consumes file info from the channel and updates statistics
+func (a *FileAnalyser) processFiles(filesChan <-chan FileInfo) {
+	// Process files in batches for better performance
+	batch := make([]FileInfo, 0, FileBatchSize)
+
+	for fileInfo := range filesChan {
+		batch = append(batch, fileInfo)
+
+		// Process batch when it's full
+		if len(batch) >= FileBatchSize {
+			a.processBatch(batch)
+			batch = batch[:0] // Clear batch but keep capacity
+		}
 	}
 
+	// Process remaining files
+	if len(batch) > 0 {
+		a.processBatch(batch)
+	}
+}
+
+// processBatch updates statistics for a batch of files
+func (a *FileAnalyser) processBatch(batch []FileInfo) {
+	// Collect stats locally first
+	var batchSize int64
+	var batchLargest int64
+	var batchLargestPath string
+	batchExtensions := make(map[string]int)
+
+	for _, file := range batch {
+		batchSize += file.Size
+		batchExtensions[file.Extension]++
+
+		if file.Size > batchLargest {
+			batchLargest = file.Size
+			batchLargestPath = file.Path
+		}
+	}
+
+	// Update global stats once with lock
+	a.resultsMu.Lock()
+	defer a.resultsMu.Unlock()
+
+	a.totalFiles += len(batch)
+	a.totalSize += batchSize
+
+	for ext, count := range batchExtensions {
+		a.extensionMap[ext] += count
+	}
+
+	if batchLargest > a.largestSize {
+		a.largestSize = batchLargest
+		a.largestFile, _ = filepath.Rel(a.repoPath, batchLargestPath)
+	}
+}
+
+// buildMetrics creates metrics from the collected statistics
+func (a *FileAnalyser) buildMetrics() []Metric {
 	now := time.Now()
 	nExt := len(a.extensionMap)
 	metricTotals := 3
@@ -105,41 +234,45 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 	}
 	sort.Strings(exts)
 
-	metrics := make([]Metric, metricTotals+nExt)
+	metrics := make([]Metric, 0, metricTotals+nExt)
 
-	metrics[0] = Metric{
+	metrics = append(metrics, Metric{
 		Name:      "total_files",
 		Value:     a.totalFiles,
 		Timestamp: now,
-	}
-	metrics[1] = Metric{
+	})
+
+	metrics = append(metrics, Metric{
 		Name:      "total_size_bytes",
 		Value:     a.totalSize,
 		Timestamp: now,
-	}
-	metrics[2] = Metric{
+	})
+
+	metrics = append(metrics, Metric{
 		Name:      "largest_file",
 		Key:       a.largestFile,
 		Value:     a.largestSize,
 		Labels:    map[string]string{"size_bytes": fmt.Sprintf("%d", a.largestSize)},
 		Timestamp: now,
-	}
+	})
 
-	for i, ext := range exts {
-		metrics[i+metricTotals] = Metric{
+	for _, ext := range exts {
+		metrics = append(metrics, Metric{
 			Name:      "files_by_extension",
 			Key:       ext,
 			Value:     a.extensionMap[ext],
 			Labels:    map[string]string{"extension": ext},
 			Timestamp: now,
-		}
+		})
 	}
 
-	return metrics, nil
+	return metrics
 }
 
 // Cleanup performs any necessary cleanup
 func (a *FileAnalyser) Cleanup() error {
-	// No cleanup needed for this analyser
+	// Clear maps to help garbage collection
+	a.fileStats = nil
+	a.extensionMap = nil
 	return nil
 }

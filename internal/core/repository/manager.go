@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sony/sonyflake"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +18,44 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/lithammer/shortuuid/v4"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/types"
 	"github.com/thushan/inspectre/internal/core/utils"
 )
 
+// Repository manager constants
+const (
+	// Permissions
+	PublicReadFilePerm = 0o644
+	DirectoryPerm      = 0o755
+
+	// Clone operation settings
+	CloneTimeout      = 10 * time.Minute
+	CleanupRetryCount = 3
+	CloneProgressSize = 10
+
+	// Cache settings
+	RepoCacheTTL     = 1 * time.Hour
+	MetadataCacheTTL = 30 * time.Minute
+
+	// URI prefixes
+	HTTPPrefix  = "http://"
+	HTTPSPrefix = "https://"
+	SSHPrefix   = "git@"
+
+	// URL validation
+	MinURLLength = 5
+)
+
+// Default paths
 var (
+	// Default task directory paths
+	DefaultTempDir = filepath.Join(os.TempDir(), "inspectre")
+
+	// Generates unique IDs for tasks
+	SonyFlake = sonyflake.NewSonyflake(sonyflake.Settings{})
+
 	// Error definitions
 	ErrRepositoryNotFound    = errors.New("repository not found")
 	ErrInvalidConfiguration  = errors.New("invalid configuration")
@@ -31,12 +63,6 @@ var (
 	ErrUnsupportedRepoType   = errors.New("unsupported repository type")
 	ErrMissingAuthentication = errors.New("missing authentication details")
 	ErrManagerClosed         = errors.New("repository manager is closed")
-
-	// UUID alphabet for task IDs (hex only for better readability)
-	UUIDAlphabet = "0123456789abcdef"
-
-	// Default task directory paths
-	DefaultTempDir = filepath.Join(os.TempDir(), "inspectre")
 )
 
 // CloneProgress wraps progress notifications from git operations
@@ -44,6 +70,13 @@ type CloneProgress struct {
 	Message string
 	Current int64
 	Total   int64
+}
+
+// RepoCache caches repository metadata
+type RepoCache struct {
+	Repo      *git.Repository
+	LastUsed  time.Time
+	ClonePath string
 }
 
 // Manager implements the RepositoryManager interface
@@ -60,6 +93,10 @@ type Manager struct {
 	wg           sync.WaitGroup
 	closed       bool
 	closedMu     sync.RWMutex
+
+	// Cache for repositories
+	repoCache   map[string]*RepoCache
+	repoCacheMu sync.RWMutex
 }
 
 // NewManager creates a new repository manager
@@ -79,6 +116,7 @@ func NewManager(configPath string, appCtx *appctx.AppContext) (*Manager, error) 
 		logger:     logging.GetLogger(),
 		tempDir:    DefaultTempDir,
 		closed:     false,
+		repoCache:  make(map[string]*RepoCache),
 	}
 
 	if err := m.loadConfig(); err != nil {
@@ -87,7 +125,13 @@ func NewManager(configPath string, appCtx *appctx.AppContext) (*Manager, error) 
 
 	// Register shutdown hook
 	if appCtx != nil {
-		appCtx.AddShutdownHook(m.shutdown)
+		appCtx.AddShutdownHookWithPriority("repomanager.shutdown",
+			appctx.PriorityNormal, m.shutdown)
+	}
+
+	// Create temp directory if it doesn't exist
+	if err := os.MkdirAll(m.tempDir, DirectoryPerm); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
 	return m, nil
@@ -116,7 +160,7 @@ func (m *Manager) loadConfig() error {
 		}
 
 		// Create directory if needed
-		if err := os.MkdirAll(filepath.Dir(m.configPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(m.configPath), DirectoryPerm); err != nil {
 			return fmt.Errorf("failed to create config directory: %w", err)
 		}
 
@@ -179,11 +223,11 @@ func (m *Manager) SaveConfig() error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(m.configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.configPath), DirectoryPerm); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	if err := os.WriteFile(m.configPath, data, 0644); err != nil {
+	if err := os.WriteFile(m.configPath, data, PublicReadFilePerm); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -231,6 +275,11 @@ func (m *Manager) AddRepository(repo Repository) error {
 		if existing.Name == repo.Name {
 			// Update existing repository
 			m.config.Repositories[i] = repo
+
+			// Invalidate cache
+			m.invalidateRepoCache(repo.Name)
+			m.invalidateRepoCache(repo.URL)
+
 			return m.SaveConfig()
 		}
 	}
@@ -257,11 +306,28 @@ func (m *Manager) RemoveRepository(nameOrURL string) error {
 		if repo.Name == nameOrURL || repo.URL == nameOrURL {
 			// Remove repository
 			m.config.Repositories = append(m.config.Repositories[:i], m.config.Repositories[i+1:]...)
+
+			// Invalidate cache
+			m.invalidateRepoCache(repo.Name)
+			m.invalidateRepoCache(repo.URL)
+
 			return m.SaveConfig()
 		}
 	}
 
 	return ErrRepositoryNotFound
+}
+
+// invalidateRepoCache removes a repo from the cache
+func (m *Manager) invalidateRepoCache(key string) {
+	if key == "" {
+		return
+	}
+
+	m.repoCacheMu.Lock()
+	defer m.repoCacheMu.Unlock()
+
+	delete(m.repoCache, key)
 }
 
 // ListRepositories returns all configured repositories
@@ -301,6 +367,15 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		defer spinner.Success(fmt.Sprintf("Clone of %s completed", repo.URL))
 	}
 
+	// Check cache first
+	if cached := m.checkRepoCache(repo.URL, targetDir); cached {
+		m.logger.Info("Using cached repository: %s", repo.URL)
+		if spinner != nil {
+			spinner.UpdateText(fmt.Sprintf("Using cached repository: %s", repo.URL))
+		}
+		return nil
+	}
+
 	// Check if directory exists
 	fi, err := os.Stat(targetDir)
 	if err == nil {
@@ -327,7 +402,7 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 	}
 
 	// Ensure the directory exists (it was either removed or never existed)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, DirectoryPerm); err != nil {
 		return fmt.Errorf("failed to create target directory: %w", err)
 	}
 
@@ -337,7 +412,7 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 	}
 
 	// Set up clone progress channel
-	progressCh := make(chan CloneProgress, 10)
+	progressCh := make(chan CloneProgress, CloneProgressSize)
 
 	// Process progress updates in the background
 	m.wg.Add(1)
@@ -386,10 +461,10 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 	}()
 
 	// Perform clone with timeout
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, 10*time.Minute)
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, CloneTimeout)
 	defer cloneCancel()
 
-	_, err = git.PlainCloneContext(cloneCtx, targetDir, false, cloneOpts)
+	repository, err := git.PlainCloneContext(cloneCtx, targetDir, false, cloneOpts)
 
 	// Close progress channel when clone completes
 	close(progressCh)
@@ -400,8 +475,54 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		return fmt.Errorf("%w: %v", ErrCloneFailure, err)
 	}
 
+	// Add to cache
+	m.cacheRepository(repo.URL, repository, targetDir)
+
 	m.logger.Info("Successfully cloned repository %s", repo.URL)
 	return nil
+}
+
+// checkRepoCache checks if repo is in cache and copies to target dir if needed
+func (m *Manager) checkRepoCache(repoURL, targetDir string) bool {
+	m.repoCacheMu.RLock()
+	cachedRepo, exists := m.repoCache[repoURL]
+	m.repoCacheMu.RUnlock()
+
+	if !exists || time.Since(cachedRepo.LastUsed) > RepoCacheTTL {
+		return false
+	}
+
+	// Cache hit, but we need to copy to target dir if they're different
+	if cachedRepo.ClonePath == targetDir {
+		// Same path, no need to copy
+		return true
+	}
+
+	// Copy repository to target
+	err := utils.CopyDirectory(cachedRepo.ClonePath, targetDir)
+	if err != nil {
+		m.logger.Warning("Failed to copy cached repo, will clone instead: %v", err)
+		return false
+	}
+
+	// Update last used time
+	m.repoCacheMu.Lock()
+	cachedRepo.LastUsed = time.Now()
+	m.repoCacheMu.Unlock()
+
+	return true
+}
+
+// cacheRepository adds a repo to the cache
+func (m *Manager) cacheRepository(repoURL string, repo *git.Repository, clonePath string) {
+	m.repoCacheMu.Lock()
+	defer m.repoCacheMu.Unlock()
+
+	m.repoCache[repoURL] = &RepoCache{
+		Repo:      repo,
+		LastUsed:  time.Now(),
+		ClonePath: clonePath,
+	}
 }
 
 // CleanUp removes the temporary directory
@@ -424,7 +545,7 @@ func (m *Manager) CleanUp(task *Task) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	return utils.RetryWithContext(ctx, 3, func() error {
+	return utils.RetryWithContext(ctx, CleanupRetryCount, func() error {
 		return os.RemoveAll(task.BaseDir)
 	})
 }
@@ -546,7 +667,8 @@ func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
 	}
 
 	// Generate task ID
-	taskID := shortuuid.NewWithAlphabet(UUIDAlphabet)
+	rawId, err := SonyFlake.NextID()
+	taskID := strconv.FormatUint(rawId, 36)
 
 	// Create base task directory
 	baseDir := filepath.Join(m.tempDir, taskID)
@@ -589,9 +711,11 @@ func GuessRepoType(url string) string {
 
 // isURL checks if a string is a URL
 func isURL(s string) bool {
-	return s != "" && (len(s) > 4) && (strings.HasPrefix(s, "http://") ||
-		strings.HasPrefix(s, "https://") ||
-		strings.HasPrefix(s, "git@"))
+	return s != "" &&
+		len(s) >= MinURLLength &&
+		(strings.HasPrefix(s, HTTPPrefix) ||
+			strings.HasPrefix(s, HTTPSPrefix) ||
+			strings.HasPrefix(s, SSHPrefix))
 }
 
 // extractRepoName extracts a repository name from its URL
