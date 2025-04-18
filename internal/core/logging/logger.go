@@ -25,8 +25,7 @@ const (
 
 // Default configuration
 const (
-	DefaultLogQueueSize = 100
-	DefaultLogLevel     = LevelInfo
+	DefaultLogLevel = LevelInfo
 )
 
 // OutputFormat defines how log messages are formatted
@@ -40,24 +39,15 @@ const (
 
 // Logger manages logging operations
 type Logger struct {
-	mu               sync.RWMutex
-	level            LogLevel
-	writers          map[string]io.Writer
-	defaultWriter    io.Writer
-	queue            chan logMessage
-	wg               sync.WaitGroup
-	format           OutputFormat
-	taskWriters      map[string]io.Writer
-	taskWritersMutex sync.RWMutex
-	filePerm         os.FileMode
-}
-
-// logMessage represents a message to be logged
-type logMessage struct {
-	level     LogLevel
-	message   string
-	taskID    string
-	timestamp time.Time
+	mu            sync.RWMutex
+	level         LogLevel
+	writers       map[string]io.Writer
+	defaultWriter io.Writer
+	format        OutputFormat
+	taskWriters   map[string]io.Writer
+	taskMu        sync.RWMutex
+	filePerm      os.FileMode
+	closed        bool // Flag to track if the logger is closed
 }
 
 var (
@@ -72,14 +62,11 @@ func GetLogger() *Logger {
 			level:         DefaultLogLevel,
 			writers:       make(map[string]io.Writer),
 			defaultWriter: os.Stdout,
-			queue:         make(chan logMessage, DefaultLogQueueSize),
 			format:        FormatColored,
 			taskWriters:   make(map[string]io.Writer),
 			filePerm:      0644,
+			closed:        false,
 		}
-
-		// Start background worker
-		go instance.processLogs()
 	})
 
 	return instance
@@ -134,8 +121,16 @@ func (l *Logger) RemoveWriter(name string) {
 
 // RegisterTaskLog creates a new log file for a task
 func (l *Logger) RegisterTaskLog(taskID, logPath string) error {
-	l.taskWritersMutex.Lock()
-	defer l.taskWritersMutex.Unlock()
+	l.taskMu.Lock()
+	defer l.taskMu.Unlock()
+
+	// Check if logger is closed
+	l.mu.RLock()
+	if l.closed {
+		l.mu.RUnlock()
+		return fmt.Errorf("logger is closed")
+	}
+	l.mu.RUnlock()
 
 	// Close any existing writer
 	if w, exists := l.taskWriters[taskID]; exists {
@@ -162,8 +157,8 @@ func (l *Logger) RegisterTaskLog(taskID, logPath string) error {
 
 // CloseTaskLog closes a task's log file
 func (l *Logger) CloseTaskLog(taskID string) {
-	l.taskWritersMutex.Lock()
-	defer l.taskWritersMutex.Unlock()
+	l.taskMu.Lock()
+	defer l.taskMu.Unlock()
 
 	if w, exists := l.taskWriters[taskID]; exists {
 		if closer, ok := w.(io.Closer); ok {
@@ -183,94 +178,35 @@ func (l *Logger) GetTaskLogReader(taskID string, logPath string) (io.ReadCloser,
 	return f, nil
 }
 
-// log sends a message to the log queue
-func (l *Logger) log(level LogLevel, taskID, format string, args ...interface{}) {
+// writeLogMessage writes a log message directly to all writers
+func (l *Logger) writeLogMessage(level LogLevel, taskID, format string, args ...interface{}) {
 	l.mu.RLock()
 	currentLevel := l.level
+	isLoggerClosed := l.closed
 	l.mu.RUnlock()
 
-	if level < currentLevel {
+	// Skip if logger is closed or level is too low
+	if isLoggerClosed || level < currentLevel {
 		return
 	}
 
+	// Format the message
 	msg := fmt.Sprintf(format, args...)
-
-	l.wg.Add(1)
-	select {
-	case l.queue <- logMessage{level: level, message: msg, taskID: taskID, timestamp: time.Now()}:
-	default:
-		// If queue is full, log directly
-		l.writeLogMessage(logMessage{level: level, message: msg, taskID: taskID, timestamp: time.Now()})
-		l.wg.Done()
-	}
-}
-
-// Debug logs debug messages
-func (l *Logger) Debug(format string, args ...interface{}) {
-	l.log(LevelDebug, "", format, args...)
-}
-
-// Info logs informational messages
-func (l *Logger) Info(format string, args ...interface{}) {
-	l.log(LevelInfo, "", format, args...)
-}
-
-// Warning logs warning messages
-func (l *Logger) Warning(format string, args ...interface{}) {
-	l.log(LevelWarning, "", format, args...)
-}
-
-// Error logs error messages
-func (l *Logger) Error(format string, args ...interface{}) {
-	l.log(LevelError, "", format, args...)
-}
-
-// TaskDebug logs debug messages for a task
-func (l *Logger) TaskDebug(taskID, format string, args ...interface{}) {
-	l.log(LevelDebug, taskID, format, args...)
-}
-
-// TaskInfo logs informational messages for a task
-func (l *Logger) TaskInfo(taskID, format string, args ...interface{}) {
-	l.log(LevelInfo, taskID, format, args...)
-}
-
-// TaskWarning logs warning messages for a task
-func (l *Logger) TaskWarning(taskID, format string, args ...interface{}) {
-	l.log(LevelWarning, taskID, format, args...)
-}
-
-// TaskError logs error messages for a task
-func (l *Logger) TaskError(taskID, format string, args ...interface{}) {
-	l.log(LevelError, taskID, format, args...)
-}
-
-// processLogs processes log messages from the queue
-func (l *Logger) processLogs() {
-	for msg := range l.queue {
-		l.writeLogMessage(msg)
-		l.wg.Done()
-	}
-}
-
-// writeLogMessage writes a log message to all registered writers
-func (l *Logger) writeLogMessage(msg logMessage) {
-	formatted := l.formatLogMessage(msg)
+	timestamp := time.Now()
+	formatted := l.formatLogMessage(level, taskID, timestamp, msg)
 
 	// Write to task log if specified
-	if msg.taskID != "" {
-		l.taskWritersMutex.RLock()
-		if writer, ok := l.taskWriters[msg.taskID]; ok {
+	if taskID != "" {
+		l.taskMu.RLock()
+		if writer, ok := l.taskWriters[taskID]; ok {
 			_, _ = fmt.Fprintln(writer, formatted)
 		}
-		l.taskWritersMutex.RUnlock()
+		l.taskMu.RUnlock()
 	}
 
-	// Write to default writer
+	// Write to default writer and all registered writers
 	l.mu.RLock()
 	_, _ = fmt.Fprintln(l.defaultWriter, formatted)
-
-	// Write to all registered writers
 	for _, w := range l.writers {
 		_, _ = fmt.Fprintln(w, formatted)
 	}
@@ -278,50 +214,50 @@ func (l *Logger) writeLogMessage(msg logMessage) {
 }
 
 // formatLogMessage formats a log message according to the configured format
-func (l *Logger) formatLogMessage(msg logMessage) string {
+func (l *Logger) formatLogMessage(level LogLevel, taskID string, timestamp time.Time, message string) string {
 	l.mu.RLock()
 	format := l.format
 	l.mu.RUnlock()
 
-	timestamp := msg.timestamp.Format("15:04:05.000")
+	timeStr := timestamp.Format("15:04:05.000")
 
 	// Format the message according to the configured format
 	switch format {
 	case FormatJSON:
-		// Simplified JSON format for example
+		// Simplified JSON format
 		taskStr := ""
-		if msg.taskID != "" {
-			taskStr = fmt.Sprintf(", \"task_id\": \"%s\"", msg.taskID)
+		if taskID != "" {
+			taskStr = fmt.Sprintf(", \"task_id\": \"%s\"", taskID)
 		}
 		return fmt.Sprintf("{\"time\": \"%s\", \"level\": \"%s\", \"message\": \"%s\"%s}",
-			msg.timestamp.Format(time.RFC3339), l.levelToString(msg.level), msg.message, taskStr)
+			timestamp.Format(time.RFC3339), l.levelToString(level), message, taskStr)
 
 	case FormatColored:
 		prefix := ""
-		if msg.taskID != "" {
-			prefix = fmt.Sprintf("[%s] ", msg.taskID)
+		if taskID != "" {
+			prefix = fmt.Sprintf("[%s] ", taskID)
 		}
 
-		switch msg.level {
+		switch level {
 		case LevelDebug:
-			return fmt.Sprintf("%s %s%s", pterm.Gray(timestamp), prefix, msg.message)
+			return fmt.Sprintf("%s %s%s", pterm.Gray(timeStr), prefix, message)
 		case LevelInfo:
-			return fmt.Sprintf("%s %s%s", pterm.FgBlue.Sprint(timestamp), prefix, msg.message)
+			return fmt.Sprintf("%s %s%s", pterm.FgBlue.Sprint(timeStr), prefix, message)
 		case LevelWarning:
-			return fmt.Sprintf("%s %s%s", pterm.FgYellow.Sprint(timestamp), prefix, pterm.Yellow(msg.message))
+			return fmt.Sprintf("%s %s%s", pterm.FgYellow.Sprint(timeStr), prefix, pterm.Yellow(message))
 		case LevelError:
-			return fmt.Sprintf("%s %s%s", pterm.FgRed.Sprint(timestamp), prefix, pterm.Red(msg.message))
+			return fmt.Sprintf("%s %s%s", pterm.FgRed.Sprint(timeStr), prefix, pterm.Red(message))
 		default:
-			return fmt.Sprintf("%s %s%s", timestamp, prefix, msg.message)
+			return fmt.Sprintf("%s %s%s", timeStr, prefix, message)
 		}
 
 	default: // FormatPlain
 		prefix := ""
-		if msg.taskID != "" {
-			prefix = fmt.Sprintf("[%s] ", msg.taskID)
+		if taskID != "" {
+			prefix = fmt.Sprintf("[%s] ", taskID)
 		}
-		levelStr := l.levelToString(msg.level)
-		return fmt.Sprintf("%s [%s] %s%s", timestamp, levelStr, prefix, msg.message)
+		levelStr := l.levelToString(level)
+		return fmt.Sprintf("%s [%s] %s%s", timeStr, levelStr, prefix, message)
 	}
 }
 
@@ -341,33 +277,80 @@ func (l *Logger) levelToString(level LogLevel) string {
 	}
 }
 
-// Flush waits for all log messages to be processed
+// Debug logs debug messages
+func (l *Logger) Debug(format string, args ...interface{}) {
+	l.writeLogMessage(LevelDebug, "", format, args...)
+}
+
+// Info logs informational messages
+func (l *Logger) Info(format string, args ...interface{}) {
+	l.writeLogMessage(LevelInfo, "", format, args...)
+}
+
+// Warning logs warning messages
+func (l *Logger) Warning(format string, args ...interface{}) {
+	l.writeLogMessage(LevelWarning, "", format, args...)
+}
+
+// Error logs error messages
+func (l *Logger) Error(format string, args ...interface{}) {
+	l.writeLogMessage(LevelError, "", format, args...)
+}
+
+// TaskDebug logs debug messages for a task
+func (l *Logger) TaskDebug(taskID, format string, args ...interface{}) {
+	l.writeLogMessage(LevelDebug, taskID, format, args...)
+}
+
+// TaskInfo logs informational messages for a task
+func (l *Logger) TaskInfo(taskID, format string, args ...interface{}) {
+	l.writeLogMessage(LevelInfo, taskID, format, args...)
+}
+
+// TaskWarning logs warning messages for a task
+func (l *Logger) TaskWarning(taskID, format string, args ...interface{}) {
+	l.writeLogMessage(LevelWarning, taskID, format, args...)
+}
+
+// TaskError logs error messages for a task
+func (l *Logger) TaskError(taskID, format string, args ...interface{}) {
+	l.writeLogMessage(LevelError, taskID, format, args...)
+}
+
+// Flush writes all pending log messages
 func (l *Logger) Flush() {
-	l.wg.Wait()
+	// Direct writing approach doesn't need flushing
+	// This is just a compatibility method
 }
 
 // Close shuts down the logger
 func (l *Logger) Close() {
-	close(l.queue)
-	l.Flush()
-
-	// Close all writers
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Mark as closed first to prevent new writes
+	l.closed = true
+
+	// Close all writers
 	for _, w := range l.writers {
 		if closer, ok := w.(io.Closer); ok {
 			_ = closer.Close()
 		}
 	}
 
+	// Clear the writers map
+	l.writers = make(map[string]io.Writer)
+
 	// Close all task writers
-	l.taskWritersMutex.Lock()
-	defer l.taskWritersMutex.Unlock()
+	l.taskMu.Lock()
+	defer l.taskMu.Unlock()
 
 	for _, w := range l.taskWriters {
 		if closer, ok := w.(io.Closer); ok {
 			_ = closer.Close()
 		}
 	}
+
+	// Clear the task writers map
+	l.taskWriters = make(map[string]io.Writer)
 }

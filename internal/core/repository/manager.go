@@ -24,11 +24,13 @@ import (
 )
 
 var (
+	// Error definitions
 	ErrRepositoryNotFound    = errors.New("repository not found")
 	ErrInvalidConfiguration  = errors.New("invalid configuration")
 	ErrCloneFailure          = errors.New("failed to clone repository")
 	ErrUnsupportedRepoType   = errors.New("unsupported repository type")
 	ErrMissingAuthentication = errors.New("missing authentication details")
+	ErrManagerClosed         = errors.New("repository manager is closed")
 
 	// UUID alphabet for task IDs (hex only for better readability)
 	UUIDAlphabet = "0123456789abcdef"
@@ -37,15 +39,27 @@ var (
 	DefaultTempDir = filepath.Join(os.TempDir(), "inspectre")
 )
 
+// CloneProgress wraps progress notifications from git operations
+type CloneProgress struct {
+	Message string
+	Current int64
+	Total   int64
+}
+
 // Manager implements the RepositoryManager interface
 type Manager struct {
-	configPath string
-	config     *Config
-	mu         sync.RWMutex
-	ctx        *appctx.AppContext
-	logger     *logging.Logger
-	display    types.DisplayProvider
-	tempDir    string
+	configPath   string
+	config       *Config
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancelFunc   context.CancelFunc
+	logger       *logging.Logger
+	display      types.DisplayProvider
+	tempDir      string
+	shutdownOnce sync.Once
+	wg           sync.WaitGroup
+	closed       bool
+	closedMu     sync.RWMutex
 }
 
 // NewManager creates a new repository manager
@@ -55,11 +69,16 @@ func NewManager(configPath string, appCtx *appctx.AppContext) (*Manager, error) 
 		configPath = "configs/repositories.json"
 	}
 
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+
 	m := &Manager{
 		configPath: configPath,
-		ctx:        appCtx,
+		ctx:        ctx,
+		cancelFunc: cancel,
 		logger:     logging.GetLogger(),
 		tempDir:    DefaultTempDir,
+		closed:     false,
 	}
 
 	if err := m.loadConfig(); err != nil {
@@ -147,6 +166,14 @@ func (m *Manager) SaveConfig() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	data, err := json.MarshalIndent(m.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -168,6 +195,14 @@ func (m *Manager) GetRepository(nameOrURL string) (*Repository, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return nil, ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	for _, repo := range m.config.Repositories {
 		if repo.Name == nameOrURL || repo.URL == nameOrURL {
 			// Return a copy to prevent modification of config
@@ -182,6 +217,14 @@ func (m *Manager) GetRepository(nameOrURL string) (*Repository, error) {
 func (m *Manager) AddRepository(repo Repository) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
 
 	// Check if repository already exists
 	for i, existing := range m.config.Repositories {
@@ -202,6 +245,14 @@ func (m *Manager) RemoveRepository(nameOrURL string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	for i, repo := range m.config.Repositories {
 		if repo.Name == nameOrURL || repo.URL == nameOrURL {
 			// Remove repository
@@ -218,6 +269,14 @@ func (m *Manager) ListRepositories() ([]Repository, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return nil, ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	// Create a copy to prevent modification of config
 	repos := make([]Repository, len(m.config.Repositories))
 	copy(repos, m.config.Repositories)
@@ -227,10 +286,19 @@ func (m *Manager) ListRepositories() ([]Repository, error) {
 
 // Clone clones a repository to the specified target directory
 func (m *Manager) Clone(repo *Repository, targetDir string) error {
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	// Start a spinner if display is available
+	var spinner types.SpinnerProvider
 	if m.display != nil {
-		m.display.StartSpinner(fmt.Sprintf("Cloning %s", repo.URL))
-		defer m.display.StopSpinner(fmt.Sprintf("Clone of %s completed", repo.URL))
+		spinner = m.display.StartSpinner(fmt.Sprintf("Cloning %s", repo.URL))
+		defer spinner.Success(fmt.Sprintf("Clone of %s completed", repo.URL))
 	}
 
 	// Check if directory exists
@@ -268,6 +336,25 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		return err
 	}
 
+	// Set up clone progress channel
+	progressCh := make(chan CloneProgress, 10)
+
+	// Process progress updates in the background
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for progress := range progressCh {
+			if spinner != nil {
+				status := progress.Message
+				if progress.Total > 0 {
+					percent := int((float64(progress.Current) / float64(progress.Total)) * 100)
+					status = fmt.Sprintf("%s (%d%%)", progress.Message, percent)
+				}
+				spinner.UpdateText(status)
+			}
+		}
+	}()
+
 	cloneOpts := &git.CloneOptions{
 		URL: repo.URL,
 	}
@@ -276,23 +363,39 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 		cloneOpts.Auth = auth
 	}
 
-	// Use progress writer if available
-	if m.display != nil {
-		progressCh := make(chan string)
-		cloneOpts.Progress = progressWriter{ch: progressCh}
-
-		// Update spinner with progress
-		go func() {
-			for msg := range progressCh {
-				m.display.UpdateSpinnerText(msg)
-			}
-		}()
+	// Use progress writer if spinner is available
+	if spinner != nil {
+		cloneOpts.Progress = &progressWriter{ch: progressCh}
 	}
 
 	m.logger.Info("Cloning repository %s to %s", repo.URL, targetDir)
-	_, err = git.PlainClone(targetDir, false, cloneOpts)
+
+	// Create a context that can be cancelled
+	ctx, cancel := context.WithCancel(m.ctx)
+	defer cancel()
+
+	// Watch for shutdown
+	go func() {
+		select {
+		case <-m.ctx.Done():
+			// Manager shutting down, cancel clone
+			cancel()
+		case <-ctx.Done():
+			// Clone finished or was cancelled
+		}
+	}()
+
+	// Perform clone with timeout
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cloneCancel()
+
+	_, err = git.PlainCloneContext(cloneCtx, targetDir, false, cloneOpts)
+
+	// Close progress channel when clone completes
+	close(progressCh)
+
 	if err != nil {
-		// Clean up the directory if cloning fails, but don't worry too much about errors
+		// Clean up the directory if cloning fails
 		_ = utils.SafeRemoveAll(targetDir)
 		return fmt.Errorf("%w: %v", ErrCloneFailure, err)
 	}
@@ -303,6 +406,14 @@ func (m *Manager) Clone(repo *Repository, targetDir string) error {
 
 // CleanUp removes the temporary directory
 func (m *Manager) CleanUp(task *Task) error {
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	if task == nil {
 		return errors.New("task cannot be nil")
 	}
@@ -320,8 +431,44 @@ func (m *Manager) CleanUp(task *Task) error {
 
 // shutdown performs a graceful shutdown
 func (m *Manager) shutdown(ctx context.Context) error {
-	m.logger.Info("Shutting down repository manager...")
-	return nil
+	var err error
+	m.shutdownOnce.Do(func() {
+		m.logger.Info("Shutting down repository manager...")
+
+		// Mark as closed first to prevent new operations
+		m.closedMu.Lock()
+		m.closed = true
+		m.closedMu.Unlock()
+
+		// Cancel context to signal shutdown to ongoing operations
+		m.cancelFunc()
+
+		// Create a timer for timeout
+		timer := time.NewTimer(1 * time.Second)
+		defer timer.Stop()
+
+		// Wait for all goroutines to complete or timeout
+		done := make(chan struct{})
+		go func() {
+			m.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// All goroutines exited cleanly
+			m.logger.Info("Repository manager shutdown completed")
+		case <-timer.C:
+			// Timeout - some goroutines didn't exit
+			m.logger.Warning("Repository manager shutdown timed out, some operations may not have completed")
+		case <-ctx.Done():
+			// Context deadline exceeded
+			err = ctx.Err()
+			m.logger.Warning("Repository manager shutdown interrupted: %v", err)
+		}
+	})
+
+	return err
 }
 
 // getAuthMethod determines the appropriate authentication method
@@ -374,6 +521,14 @@ func (m *Manager) getAuthMethod(repo *Repository) (transport.AuthMethod, error) 
 
 // CreateTask creates a new analysis task
 func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
+	// Check if manager is closed
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return nil, ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	repo, err := m.GetRepository(nameOrURL)
 	if err != nil {
 		// Handle case when URL is provided directly
@@ -461,25 +616,39 @@ func extractRepoName(url string) string {
 
 // progressWriter is a helper to relay Git clone progress to the display
 type progressWriter struct {
-	ch chan<- string
+	ch chan<- CloneProgress
 }
 
 // Write implements io.Writer
-func (pw progressWriter) Write(p []byte) (n int, err error) {
+func (pw *progressWriter) Write(p []byte) (n int, err error) {
 	// Extract a readable progress message
 	msg := strings.TrimSpace(string(p))
 	if msg != "" {
+		// Try to parse progress information
+		progress := CloneProgress{
+			Message: msg,
+		}
+
+		// Look for counts/percentages in output
+		// Example format: "Receiving objects:  67% (591/881)"
+		re := regexp.MustCompile(`(\d+)%\s+\((\d+)/(\d+)\)`)
+		if matches := re.FindStringSubmatch(msg); len(matches) >= 4 {
+			// Extract current and total from match groups
+			current, _ := fmt.Sscanf(matches[2], "%d", &progress.Current)
+			total, _ := fmt.Sscanf(matches[3], "%d", &progress.Total)
+			if current > 0 && total > 0 {
+				progress.Current = int64(current)
+				progress.Total = int64(total)
+			}
+		}
+
+		// Send progress update (non-blocking)
 		select {
-		case pw.ch <- msg:
+		case pw.ch <- progress:
+			// Progress update sent
 		default:
-			// Don't block if channel is full
+			// Channel buffer full, skip this update
 		}
 	}
 	return len(p), nil
-}
-
-// Close closes the progress channel
-func (pw progressWriter) Close() error {
-	close(pw.ch)
-	return nil
 }

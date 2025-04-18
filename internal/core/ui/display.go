@@ -1,7 +1,10 @@
+// internal/core/ui/display.go - Corrected version
 package ui
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pterm/pterm"
@@ -10,6 +13,7 @@ import (
 	"github.com/thushan/inspectre/internal/core/types"
 )
 
+// UI display constants
 const (
 	// Progress bar styles
 	ProgressBarWidth = 40
@@ -33,11 +37,31 @@ type DisplayOptions struct {
 	Quiet   bool
 }
 
+// UIEvent represents an event that needs to be displayed
+type UIEvent struct {
+	Type      string
+	Message   string
+	Data      interface{}
+	Timestamp time.Time
+}
+
 // Display represents a UI display manager
 type Display struct {
 	options     DisplayOptions
-	progressBar *pterm.ProgressbarPrinter
 	spinner     *pterm.SpinnerPrinter
+	progressBar *pterm.ProgressbarPrinter
+
+	// Event handling
+	eventChan chan UIEvent
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+
+	// Thread safety for UI components
+	spinnerMu  sync.Mutex
+	progressMu sync.Mutex
+	closed     bool
+	closedMu   sync.RWMutex
 }
 
 // NewDisplay creates a new display manager
@@ -52,13 +76,192 @@ func NewDisplay(options DisplayOptions) *Display {
 		pterm.DisableColor()
 	}
 
-	return &Display{
-		options: options,
+	// Create context for event handling
+	ctx, cancel := context.WithCancel(context.Background())
+
+	d := &Display{
+		options:   options,
+		eventChan: make(chan UIEvent, 100),
+		ctx:       ctx,
+		cancel:    cancel,
+		closed:    false,
 	}
+
+	// Start event handling goroutine
+	d.startEventHandler()
+
+	return d
+}
+
+// startEventHandler processes UI events in a single goroutine
+func (d *Display) startEventHandler() {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+
+		for {
+			select {
+			case <-d.ctx.Done():
+				// Context cancelled, exit
+				return
+
+			case event, ok := <-d.eventChan:
+				if !ok {
+					// Channel closed
+					return
+				}
+
+				// Process event
+				d.handleEvent(event)
+			}
+		}
+	}()
+}
+
+// handleEvent processes a UI event
+func (d *Display) handleEvent(event UIEvent) {
+	switch event.Type {
+	case "spinner_start":
+		d.startSpinnerInternal(event.Message)
+
+	case "spinner_update":
+		d.updateSpinnerTextInternal(event.Message)
+
+	case "spinner_stop":
+		d.stopSpinnerInternal(event.Message)
+
+	case "spinner_success":
+		d.successSpinnerInternal(event.Message)
+
+	case "spinner_fail":
+		d.failSpinnerInternal(event.Message)
+
+	case "spinner_warning":
+		d.warningSpinnerInternal(event.Message)
+
+	case "progress_start":
+		if progress, ok := event.Data.(map[string]interface{}); ok {
+			total := int(progress["total"].(float64))
+			title := progress["title"].(string)
+			d.startProgressInternal(total, title)
+		}
+
+	case "progress_update":
+		if value, ok := event.Data.(float64); ok {
+			d.updateProgressInternal(int(value))
+		}
+
+	case "progress_stop":
+		d.stopProgressInternal()
+
+	case "show_success":
+		d.showSuccessInternal(event.Message)
+
+	case "show_info":
+		d.showInfoInternal(event.Message)
+
+	case "show_warning":
+		d.showWarningInternal(event.Message)
+
+	case "show_error":
+		d.showErrorInternal(event.Message)
+
+	case "show_header":
+		d.showHeaderInternal(event.Message)
+
+	case "show_results":
+		if results, ok := event.Data.([]*analysis.Result); ok {
+			d.showResultsInternal(results)
+		}
+
+	case "show_task_info":
+		if task, ok := event.Data.(*types.Task); ok {
+			d.showTaskInfoInternal(task)
+		}
+
+	case "print_table":
+		if tableData, ok := event.Data.(map[string]interface{}); ok {
+			headers := tableData["headers"].([]string)
+			rows := tableData["rows"].([][]string)
+			d.printTableInternal(headers, rows)
+		}
+	}
+}
+
+// queueEvent adds an event to the processing queue
+func (d *Display) queueEvent(eventType, message string, data interface{}) {
+	// Check if display is closed
+	d.closedMu.RLock()
+	isClosed := d.closed
+	d.closedMu.RUnlock()
+
+	if isClosed {
+		return
+	}
+
+	// Create event
+	event := UIEvent{
+		Type:      eventType,
+		Message:   message,
+		Data:      data,
+		Timestamp: time.Now(),
+	}
+
+	// Try to send event to channel (non-blocking)
+	select {
+	case d.eventChan <- event:
+		// Event sent
+	case <-d.ctx.Done():
+		// Context cancelled
+	default:
+		// Channel full, log this
+		logger := logging.GetLogger()
+		logger.Warning("UI event channel full, dropped event: %s", eventType)
+	}
+}
+
+// Close shuts down the display manager
+func (d *Display) Close() {
+	d.closedMu.Lock()
+	if d.closed {
+		d.closedMu.Unlock()
+		return
+	}
+	d.closed = true
+	d.closedMu.Unlock()
+
+	// Cancel context
+	d.cancel()
+
+	// Stop any active spinner
+	d.spinnerMu.Lock()
+	if d.spinner != nil {
+		d.spinner.Stop()
+		d.spinner = nil
+	}
+	d.spinnerMu.Unlock()
+
+	// Stop any active progress bar
+	d.progressMu.Lock()
+	if d.progressBar != nil {
+		d.progressBar.Stop()
+		d.progressBar = nil
+	}
+	d.progressMu.Unlock()
+
+	// Close event channel
+	close(d.eventChan)
+
+	// Wait for event handler to finish
+	d.wg.Wait()
 }
 
 // ShowLogo displays the Inspectre logo
 func (d *Display) ShowLogo() {
+	if d.options.Quiet {
+		return
+	}
+
 	fmt.Println(`╔──────────────────────────────────────────────────────────────────────────╗
 │  ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗██████╗ ███████╗  │
 │  ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔════╝  │
@@ -69,8 +272,253 @@ func (d *Display) ShowLogo() {
 ╚──────────────────────────────────────────────────────────────────────────╝`)
 }
 
+// StartSpinner starts a spinner
+func (d *Display) StartSpinner(text string) types.SpinnerProvider {
+	d.queueEvent("spinner_start", text, nil)
+	return &SpinnerAdapter{display: d}
+}
+
+// UpdateSpinnerText updates the spinner text
+func (d *Display) UpdateSpinnerText(text string) {
+	d.queueEvent("spinner_update", text, nil)
+}
+
+// StopSpinner stops the spinner
+func (d *Display) StopSpinner(text string) {
+	d.queueEvent("spinner_stop", text, nil)
+}
+
 // ShowHeader displays a section header
 func (d *Display) ShowHeader(title string) {
+	d.queueEvent("show_header", title, nil)
+}
+
+// ShowTaskInfo displays task information
+func (d *Display) ShowTaskInfo(task *types.Task) {
+	d.queueEvent("show_task_info", "", task)
+}
+
+// ShowResults displays analysis results
+func (d *Display) ShowResults(results []*analysis.Result) {
+	d.queueEvent("show_results", "", results)
+}
+
+// ShowSuccess displays a success message
+func (d *Display) ShowSuccess(message string) {
+	d.queueEvent("show_success", message, nil)
+}
+
+// ShowInfo displays an informational message
+func (d *Display) ShowInfo(message string) {
+	d.queueEvent("show_info", message, nil)
+}
+
+// ShowWarning displays a warning message
+func (d *Display) ShowWarning(message string) {
+	d.queueEvent("show_warning", message, nil)
+}
+
+// ShowError displays an error message
+func (d *Display) ShowError(message string) {
+	d.queueEvent("show_error", message, nil)
+}
+
+// PrintResultTable prints a table of results
+func (d *Display) PrintResultTable(headers []string, rows [][]string) {
+	tableData := map[string]interface{}{
+		"headers": headers,
+		"rows":    rows,
+	}
+	d.queueEvent("print_table", "", tableData)
+}
+
+// Confirm asks the user for confirmation
+func (d *Display) Confirm(message string) bool {
+	if d.options.Quiet {
+		return true // Default to yes in quiet mode
+	}
+
+	result, _ := pterm.DefaultInteractiveConfirm.
+		WithDefaultText(message).
+		WithDefaultValue(true).
+		Show()
+
+	return result
+}
+
+// Internal handler methods for UI events
+// --------------------------------------
+
+func (d *Display) startSpinnerInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	// Stop existing spinner if needed
+	if d.spinner != nil {
+		d.spinner.Stop()
+	}
+
+	// Create new spinner
+	spinner, _ := pterm.DefaultSpinner.WithText(text).Start()
+	d.spinner = spinner
+}
+
+func (d *Display) updateSpinnerTextInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	if d.spinner != nil {
+		d.spinner.UpdateText(text)
+	}
+}
+
+func (d *Display) stopSpinnerInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	if d.spinner != nil {
+		d.spinner.Stop()
+		d.spinner = nil
+	}
+}
+
+func (d *Display) successSpinnerInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	if d.spinner != nil {
+		d.spinner.Success(text)
+		d.spinner = nil
+	}
+}
+
+func (d *Display) failSpinnerInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	if d.spinner != nil {
+		d.spinner.Fail(text)
+		d.spinner = nil
+	}
+}
+
+func (d *Display) warningSpinnerInternal(text string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.spinnerMu.Lock()
+	defer d.spinnerMu.Unlock()
+
+	if d.spinner != nil {
+		d.spinner.Warning(text)
+		d.spinner = nil
+	}
+}
+
+func (d *Display) startProgressInternal(total int, title string) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.progressMu.Lock()
+	defer d.progressMu.Unlock()
+
+	// Stop existing progress bar if needed
+	if d.progressBar != nil {
+		d.progressBar.Stop()
+	}
+
+	// Create new progress bar
+	bar, _ := pterm.DefaultProgressbar.
+		WithTotal(total).
+		WithTitle(title).
+		WithRemoveWhenDone(true).
+		Start()
+
+	d.progressBar = bar
+}
+
+func (d *Display) updateProgressInternal(increment int) {
+	if d.options.Quiet {
+		return
+	}
+
+	d.progressMu.Lock()
+	defer d.progressMu.Unlock()
+
+	if d.progressBar != nil {
+		d.progressBar.Add(increment)
+	}
+}
+
+func (d *Display) stopProgressInternal() {
+	if d.options.Quiet {
+		return
+	}
+
+	d.progressMu.Lock()
+	defer d.progressMu.Unlock()
+
+	if d.progressBar != nil {
+		d.progressBar.Stop()
+		d.progressBar = nil
+	}
+}
+
+func (d *Display) showSuccessInternal(message string) {
+	if d.options.Quiet {
+		return
+	}
+
+	pterm.Success.Println(message)
+}
+
+func (d *Display) showInfoInternal(message string) {
+	if d.options.Quiet {
+		return
+	}
+
+	pterm.Info.Println(message)
+}
+
+func (d *Display) showWarningInternal(message string) {
+	if d.options.Quiet {
+		return
+	}
+
+	pterm.Warning.Println(message)
+}
+
+func (d *Display) showErrorInternal(message string) {
+	if d.options.Quiet {
+		return
+	}
+
+	pterm.Error.Println(message)
+}
+
+func (d *Display) showHeaderInternal(title string) {
 	if d.options.Quiet {
 		return
 	}
@@ -80,8 +528,7 @@ func (d *Display) ShowHeader(title string) {
 	fmt.Println()
 }
 
-// ShowTaskInfo displays task information
-func (d *Display) ShowTaskInfo(task *types.Task) {
+func (d *Display) showTaskInfoInternal(task *types.Task) {
 	if d.options.Quiet {
 		return
 	}
@@ -109,158 +556,7 @@ func (d *Display) ShowTaskInfo(task *types.Task) {
 	fmt.Println()
 }
 
-// ShowRepositoryInfo displays repository information
-func (d *Display) ShowRepositoryInfo(repo *types.Repository) {
-	if d.options.Quiet {
-		return
-	}
-
-	// Determine auth type
-	authType := "none"
-	if repo.Auth.Token != "" {
-		authType = "token"
-	} else if repo.Auth.Username != "" {
-		authType = "user/pass"
-	}
-
-	// Create a table for repository details
-	tableData := pterm.TableData{
-		{"Name", repo.Name},
-		{"URL", repo.URL},
-		{"Type", repo.Type},
-		{"Authentication", authType},
-	}
-
-	// Print the table
-	pterm.DefaultTable.WithHasHeader(false).WithData(tableData).Render()
-	fmt.Println()
-}
-
-// StartProgressBar starts a progress bar
-func (d *Display) StartProgressBar(total int, title string) {
-	if d.options.Quiet {
-		return
-	}
-
-	d.progressBar, _ = pterm.DefaultProgressbar.
-		WithTotal(total).
-		WithTitle(title).
-		WithRemoveWhenDone(true).
-		Start()
-}
-
-// UpdateProgressBar updates the progress bar
-func (d *Display) UpdateProgressBar(increment int) {
-	if d.options.Quiet || d.progressBar == nil {
-		return
-	}
-
-	d.progressBar.Add(increment)
-}
-
-// StopProgressBar stops the progress bar
-func (d *Display) StopProgressBar() {
-	if d.options.Quiet || d.progressBar == nil {
-		return
-	}
-
-	_, _ = d.progressBar.Stop()
-	d.progressBar = nil
-}
-
-// StartSpinner starts a spinner
-func (d *Display) StartSpinner(text string) types.SpinnerProvider {
-	if d.options.Quiet {
-		return &NullSpinner{}
-	}
-
-	spinner, _ := pterm.DefaultSpinner.
-		WithText(text).
-		Start()
-
-	d.spinner = spinner
-	return &SpinnerWrapper{spinner: spinner}
-}
-
-// UpdateSpinnerText updates the spinner text
-func (d *Display) UpdateSpinnerText(text string) {
-	if d.options.Quiet || d.spinner == nil {
-		return
-	}
-
-	d.spinner.UpdateText(text)
-}
-
-// StopSpinner stops the spinner
-func (d *Display) StopSpinner(text string) {
-	if d.options.Quiet || d.spinner == nil {
-		return
-	}
-
-	d.spinner.Success(text)
-	d.spinner = nil
-}
-
-// SpinnerWrapper wraps pterm.SpinnerPrinter to implement SpinnerProvider
-type SpinnerWrapper struct {
-	spinner *pterm.SpinnerPrinter
-}
-
-// UpdateText updates the spinner text
-func (s *SpinnerWrapper) UpdateText(text string) {
-	if s.spinner != nil {
-		s.spinner.UpdateText(text)
-	}
-}
-
-// Success stops the spinner with a success message
-func (s *SpinnerWrapper) Success(text string) {
-	if s.spinner != nil {
-		s.spinner.Success(text)
-	}
-}
-
-// Fail stops the spinner with a failure message
-func (s *SpinnerWrapper) Fail(text string) {
-	if s.spinner != nil {
-		s.spinner.Fail(text)
-	}
-}
-
-// Warning stops the spinner with a warning message
-func (s *SpinnerWrapper) Warning(text string) {
-	if s.spinner != nil {
-		s.spinner.Warning(text)
-	}
-}
-
-// Info stops the spinner with an info message
-func (s *SpinnerWrapper) Info(text string) {
-	if s.spinner != nil {
-		s.spinner.Info(text)
-	}
-}
-
-// NullSpinner is a no-op implementation of SpinnerProvider
-type NullSpinner struct{}
-
-// UpdateText is a no-op
-func (s *NullSpinner) UpdateText(text string) {}
-
-// Success is a no-op
-func (s *NullSpinner) Success(text string) {}
-
-// Fail is a no-op
-func (s *NullSpinner) Fail(text string) {}
-
-// Warning is a no-op
-func (s *NullSpinner) Warning(text string) {}
-
-// Info is a no-op
-func (s *NullSpinner) Info(text string) {}
-
-// ShowResults displays analysis results
-func (d *Display) ShowResults(results []*analysis.Result) {
+func (d *Display) showResultsInternal(results []*analysis.Result) {
 	if d.options.Quiet {
 		return
 	}
@@ -273,100 +569,7 @@ func (d *Display) ShowResults(results []*analysis.Result) {
 	fmt.Println(formattedResults)
 }
 
-// ShowSuccess displays a success message
-func (d *Display) ShowSuccess(message string) {
-	if d.options.Quiet {
-		return
-	}
-
-	pterm.Success.Println(message)
-}
-
-// ShowInfo displays an informational message
-func (d *Display) ShowInfo(message string) {
-	if d.options.Quiet {
-		return
-	}
-
-	pterm.Info.Println(message)
-}
-
-// ShowWarning displays a warning message
-func (d *Display) ShowWarning(message string) {
-	if d.options.Quiet {
-		return
-	}
-
-	pterm.Warning.Println(message)
-}
-
-// ShowError displays an error message
-func (d *Display) ShowError(message string) {
-	if d.options.Quiet {
-		return
-	}
-
-	pterm.Error.Println(message)
-}
-
-// ShowBulletList displays a bullet list
-func (d *Display) ShowBulletList(items []string) {
-	if d.options.Quiet {
-		return
-	}
-
-	for _, item := range items {
-		pterm.DefaultBulletList.WithItems([]pterm.BulletListItem{
-			{Level: 0, Text: item},
-		}).Render()
-	}
-	fmt.Println()
-}
-
-// ShowTreeView displays a tree view of data
-func (d *Display) ShowTreeView(title string, items map[string][]string) {
-	if d.options.Quiet {
-		return
-	}
-
-	leveledList := pterm.LeveledList{
-		pterm.LeveledListItem{Level: 0, Text: title},
-	}
-
-	for category, subItems := range items {
-		leveledList = append(leveledList, pterm.LeveledListItem{Level: 1, Text: category})
-
-		for _, subItem := range subItems {
-			leveledList = append(leveledList, pterm.LeveledListItem{Level: 2, Text: subItem})
-		}
-	}
-
-	pterm.DefaultTree.WithRoot(pterm.NewTreeFromLeveledList(leveledList)).Render()
-	fmt.Println()
-}
-
-// formatTaskStatus formats a task status with colors
-func (d *Display) formatTaskStatus(status string) string {
-	if d.options.NoColor {
-		return status
-	}
-
-	switch status {
-	case "Completed":
-		return pterm.FgGreen.Sprint(status)
-	case "Running":
-		return pterm.FgBlue.Sprint(status)
-	case "Failed":
-		return pterm.FgRed.Sprint(status)
-	case "Cancelled":
-		return pterm.FgYellow.Sprint(status)
-	default:
-		return status
-	}
-}
-
-// PrintResultTable prints a table of results
-func (d *Display) PrintResultTable(headers []string, rows [][]string) {
+func (d *Display) printTableInternal(headers []string, rows [][]string) {
 	if d.options.Quiet {
 		return
 	}
@@ -382,32 +585,26 @@ func (d *Display) PrintResultTable(headers []string, rows [][]string) {
 	fmt.Println()
 }
 
-// Confirm asks the user for confirmation
-func (d *Display) Confirm(message string) bool {
-	if d.options.Quiet {
-		return true // Default to yes in quiet mode
+// formatTaskStatus formats a task status with colors
+func (d *Display) formatTaskStatus(status string) string {
+	if d.options.NoColor {
+		return status
 	}
 
-	result, _ := pterm.DefaultInteractiveConfirm.
-		WithDefaultText(message).
-		WithDefaultValue(true).
-		Show()
-
-	return result
-}
-
-// AskForInput asks the user for input
-func (d *Display) AskForInput(message, defaultValue string) string {
-	if d.options.Quiet {
-		return defaultValue
+	switch status {
+	case "Completed":
+		return pterm.FgGreen.Sprint(status)
+	case "Running":
+		return pterm.FgBlue.Sprint(status)
+	case "Queued":
+		return pterm.FgCyan.Sprint(status)
+	case "Failed":
+		return pterm.FgRed.Sprint(status)
+	case "Cancelled":
+		return pterm.FgYellow.Sprint(status)
+	default:
+		return status
 	}
-
-	result, _ := pterm.DefaultInteractiveTextInput.
-		WithDefaultText(message).
-		WithDefaultValue(defaultValue).
-		Show()
-
-	return result
 }
 
 // formatDuration formats a duration in a human-readable way
@@ -421,4 +618,29 @@ func formatDuration(d time.Duration) string {
 		seconds := (d % time.Minute) / time.Second
 		return fmt.Sprintf("%d min %d sec", minutes, seconds)
 	}
+}
+
+// SpinnerAdapter adapts the internal display to the SpinnerProvider interface
+type SpinnerAdapter struct {
+	display *Display
+}
+
+func (s *SpinnerAdapter) UpdateText(text string) {
+	s.display.UpdateSpinnerText(text)
+}
+
+func (s *SpinnerAdapter) Success(text string) {
+	s.display.queueEvent("spinner_success", text, nil)
+}
+
+func (s *SpinnerAdapter) Fail(text string) {
+	s.display.queueEvent("spinner_fail", text, nil)
+}
+
+func (s *SpinnerAdapter) Warning(text string) {
+	s.display.queueEvent("spinner_warning", text, nil)
+}
+
+func (s *SpinnerAdapter) Info(text string) {
+	s.display.queueEvent("spinner_stop", text, nil)
 }
