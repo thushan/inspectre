@@ -1,48 +1,22 @@
 package repository
 
 import (
-	"time"
+	"github.com/thushan/inspectre/internal/core/types"
 )
 
-// Repository defines a code repository configuration
-type Repository struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	Type string `json:"type"` // github, gitlab, bitbucket
-	Auth Auth   `json:"auth"`
-}
+// Use the common Task type from types package
+type Task = types.Task
 
-// Auth contains authentication details for repository access
-type Auth struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
-}
+// Use the common Repository type from types package
+type Repository = types.Repository
 
-// Config defines the structure of the repositories.json file
-type Config struct {
-	Version      int          `json:"version"`
-	Repositories []Repository `json:"repositories"`
-}
+// Use the common Auth type from types package
+type Auth = types.Auth
+
+// Use the common Config type from types package
+type Config = types.Config
 
 // RepositoryManager handles repository operations
 type RepositoryManager interface {
-	GetRepository(nameOrURL string) (*Repository, error)
-	ListRepositories() ([]Repository, error)
-	Clone(repo *Repository, targetDir string) error
-	CleanUp(targetDir string) error
-}
-
-// Task represents a running analysis task
-type Task struct {
-	ID         string    `json:"id"`
-	Repository string    `json:"repository"` // Repository URL or name
-	Status     string    `json:"status"`     // Created, Running, Completed, Foiled
-	StartTime  time.Time `json:"start_time"`
-	EndTime    time.Time `json:"end_time,omitempty"`
-	BaseDir    string    `json:"base_dir"`   // Base directory for all task files
-	RepoDir    string    `json:"repo_dir"`   // Directory where repo is cloned
-	AssetsDir  string    `json:"assets_dir"` // Directory for storing assets/results
-	LogFile    string    `json:"log_file"`   // Path to log file
-	Error      string    `json:"error,omitempty"`
+	types.RepositoryManager
 }

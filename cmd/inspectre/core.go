@@ -1,69 +1,19 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-	"text/tabwriter"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/config"
-	"github.com/thushan/inspectre/internal/core/repository"
-	"github.com/thushan/inspectre/internal/core/task"
-	"github.com/thushan/inspectre/internal/extensions"
-	"github.com/thushan/inspectre/internal/storage"
+	"github.com/pterm/pterm"
+	"github.com/thushan/inspectre/internal/core/logging"
+	"github.com/thushan/inspectre/internal/core/types"
 	"github.com/urfave/cli/v2"
 )
-
-var (
-	repoManager      *repository.Manager
-	storageManager   *storage.Manager
-	extensionManager *extensions.Manager
-	taskManager      *task.Manager
-	setupOnce        sync.Once
-)
-
-// setup initializes the core components
-func setup(configPath string) error {
-	var setupErr error
-
-	setupOnce.Do(func() {
-		appConfig, err := config.LoadConfig(configPath)
-		if err != nil {
-			setupErr = fmt.Errorf("failed to load config: %w", err)
-			return
-		}
-
-		repoManager, setupErr = repository.NewManager(appConfig.RepositoriesFile)
-		if setupErr != nil {
-			return
-		}
-
-		dataDir := filepath.Join("data")
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			setupErr = fmt.Errorf("failed to create data directory: %w", err)
-			return
-		}
-
-		storageManager, setupErr = storage.NewManager("file", dataDir)
-		if setupErr != nil {
-			return
-		}
-
-		extensionManager = extensions.NewManager(appConfig.PluginsDir)
-		if err := extensionManager.LoadExtensionsFromConfig(""); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load extensions: %v\n", err)
-		}
-
-		taskManager = task.NewManager(repoManager, storageManager, extensionManager)
-	})
-
-	return setupErr
-}
 
 func CoreCommands() []*cli.Command {
 	return []*cli.Command{
@@ -72,17 +22,8 @@ func CoreCommands() []*cli.Command {
 			Usage:     "Run analysis on a repository",
 			ArgsUsage: "<repository-name-or-url>",
 			Flags: []cli.Flag{
-				&cli.StringFlag{
-					Name:    "output",
-					Aliases: []string{"o"},
-					Usage:   "Output format (json, table, etc)",
-					Value:   "table",
-				},
-				&cli.StringFlag{
-					Name:    "config",
-					Aliases: []string{"c"},
-					Usage:   "Custom path for configuration data",
-				},
+				outputFormatFlag,
+				configFlag,
 				&cli.BoolFlag{
 					Name:    "no-wait",
 					Aliases: []string{"n"},
@@ -96,6 +37,7 @@ func CoreCommands() []*cli.Command {
 			Name:  "ps",
 			Usage: "List running tasks",
 			Flags: []cli.Flag{
+				outputFormatFlag,
 				&cli.BoolFlag{
 					Name:  "all",
 					Usage: "Show all tasks including completed",
@@ -103,10 +45,6 @@ func CoreCommands() []*cli.Command {
 				&cli.BoolFlag{
 					Name:  "failed",
 					Usage: "Show only failed tasks",
-				},
-				&cli.BoolFlag{
-					Name:  "json",
-					Usage: "Output in JSON format",
 				},
 			},
 			Action: psAction,
@@ -128,10 +66,7 @@ func CoreCommands() []*cli.Command {
 			Name:  "repos",
 			Usage: "List configured repositories",
 			Flags: []cli.Flag{
-				&cli.BoolFlag{
-					Name:  "json",
-					Usage: "Output in JSON format",
-				},
+				outputFormatFlag,
 			},
 			Action: reposAction,
 		},
@@ -145,120 +80,184 @@ func CoreCommands() []*cli.Command {
 					Usage:   "SQL query to execute",
 					Value:   "SELECT * FROM metrics LIMIT 10",
 				},
-				&cli.StringFlag{
-					Name:    "output",
-					Aliases: []string{"o"},
-					Usage:   "Output format (json, table)",
-					Value:   "table",
-				},
+				outputFormatFlag,
 			},
 			Action: queryAction,
 		},
+		{
+			Name:      "cancel",
+			Usage:     "Cancel a running task",
+			ArgsUsage: "<task-id>",
+			Flags: []cli.Flag{
+				&cli.BoolFlag{
+					Name:    "yes",
+					Aliases: []string{"y"},
+					Usage:   "Skip confirmation",
+					Value:   false,
+				},
+			},
+			Action: cancelAction,
+		},
 	}
 }
+
 func runAction(c *cli.Context) error {
+	display := createDisplay(c)
+
 	if err := setup(c.String("config")); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
 	}
+
+	// Set the display on task manager
+	taskManager.SetDisplay(display)
 
 	repoURL := c.Args().First()
 	if repoURL == "" {
+		display.ShowError("Repository name or URL is required")
 		return fmt.Errorf("repository name or URL is required")
 	}
 
+	// Create a spinner for the task creation
+	spinner := display.StartSpinner(fmt.Sprintf("Creating task for %s", repoURL))
+
 	task, err := taskManager.CreateTask(repoURL)
 	if err != nil {
-		return fmt.Errorf("failed to create task: %w", err)
+		spinner.Fail(fmt.Sprintf("Failed to create task: %v", err))
+		return fmt.Errorf("failed to create task: %v", err)
 	}
 
-	noWait := c.Bool("no-wait")
+	// Update spinner text
+	spinner.UpdateText(fmt.Sprintf("Starting task %s for %s", task.ID, repoURL))
 
 	// Start the task
 	if err := taskManager.StartTask(task.ID); err != nil {
-		return fmt.Errorf("failed to start task: %w", err)
+		spinner.Fail(fmt.Sprintf("Failed to start task: %v", err))
+		return fmt.Errorf("failed to start task: %v", err)
 	}
 
-	fmt.Printf("Started analysis task %s for repository %s\n", task.ID, repoURL)
+	spinner.Success(fmt.Sprintf("Started task %s for repository %s", task.ID, repoURL))
 
+	noWait := c.Bool("no-wait")
 	if noWait {
-		fmt.Printf("Task is running in the background. Check status with: inspectre ps\n")
-		fmt.Printf("View logs with: inspectre logs %s\n", task.ID)
+		display.ShowInfo(fmt.Sprintf("Task is running in the background. Check status with: inspectre ps"))
+		display.ShowInfo(fmt.Sprintf("View logs with: inspectre logs %s", task.ID))
 		return nil
 	}
 
-	fmt.Println("Waiting for task to complete...")
+	// Show task info
+	display.ShowHeader("Task Information")
+	display.ShowTaskInfo(task)
 
-	// Use a more reliable pattern for monitoring task completion
+	waitSpinner := display.StartSpinner("Waiting for task to complete...")
+
+	// Use a context with timeout to avoid hanging indefinitely
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	// Monitor task completion
 	for {
-		time.Sleep(1 * time.Second)
-
-		currentTask, err := taskManager.GetTask(task.ID)
-		if err != nil {
-			return fmt.Errorf("failed to get task status: %w", err)
-		}
-
-		if currentTask.Status == "Completed" || currentTask.Status == "Failed" {
-			// Task has finished
-			if currentTask.Status == "Failed" {
-				return fmt.Errorf("task failed: %s", currentTask.Error)
+		select {
+		case <-ctx.Done():
+			waitSpinner.Fail("Timeout waiting for task to complete")
+			return fmt.Errorf("timeout waiting for task to complete")
+		case <-time.After(1 * time.Second):
+			// Check task status
+			currentTask, err := taskManager.GetTask(task.ID)
+			if err != nil {
+				waitSpinner.Fail(fmt.Sprintf("Failed to get task status: %v", err))
+				return fmt.Errorf("failed to get task status: %v", err)
 			}
 
-			fmt.Println("Task completed successfully")
-
-			// Try multiple times to get the log file since we may have just closed it
-			var reader io.ReadCloser
-			var logErr error
-
-			for retry := 0; retry < 3; retry++ {
-				reader, logErr = taskManager.GetLogReader(task.ID)
-				if logErr == nil {
-					break
+			if currentTask.Status == "Completed" || currentTask.Status == "Failed" || currentTask.Status == "Cancelled" {
+				// Task has finished
+				if currentTask.Status == "Failed" {
+					waitSpinner.Fail(fmt.Sprintf("Task failed: %s", currentTask.Error))
+					return fmt.Errorf("task failed: %s", currentTask.Error)
+				} else if currentTask.Status == "Cancelled" {
+					waitSpinner.Warning("Task was cancelled")
+					return fmt.Errorf("task was cancelled")
 				}
-				time.Sleep(100 * time.Millisecond)
-			}
 
-			if logErr != nil {
-				return fmt.Errorf("failed to get logs: %w", logErr)
-			}
-			defer reader.Close()
+				waitSpinner.Success("Task completed successfully")
 
-			// Copy log contents to stdout
-			if _, err := io.Copy(os.Stdout, reader); err != nil {
-				return fmt.Errorf("failed to read logs: %w", err)
-			}
+				// Show task logs
+				display.ShowHeader("Task Logs")
 
-			return nil
+				// Try multiple times to get the log file since we may have just closed it
+				var reader io.ReadCloser
+				var logErr error
+
+				for retry := 0; retry < 3; retry++ {
+					reader, logErr = taskManager.GetLogReader(task.ID)
+					if logErr == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+
+				if logErr != nil {
+					display.ShowWarning(fmt.Sprintf("Failed to get logs: %v", logErr))
+				} else {
+					defer reader.Close()
+					// Copy log contents to stdout with a prefix
+					data, err := io.ReadAll(reader)
+					if err != nil {
+						display.ShowWarning(fmt.Sprintf("Failed to read logs: %v", err))
+					} else {
+						lines := strings.Split(string(data), "\n")
+						for _, line := range lines {
+							if line != "" {
+								fmt.Println(line)
+							}
+						}
+					}
+				}
+
+				return nil
+			}
 		}
 	}
 }
 
 func psAction(c *cli.Context) error {
+	display := createDisplay(c)
+
 	if err := setup(c.String("config")); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
 	}
 
 	showAll := c.Bool("all")
 	showFailed := c.Bool("failed")
-	jsonOutput := c.Bool("json")
+	outputFormat := c.String("output")
+
+	// Start spinner while retrieving tasks
+	spinner := display.StartSpinner("Retrieving tasks...")
 
 	tasks := taskManager.ListTasks(showAll, showFailed)
 
-	if jsonOutput {
+	if len(tasks) == 0 {
+		spinner.Info("No tasks found")
+		return nil
+	}
+
+	spinner.Success(fmt.Sprintf("Found %d tasks", len(tasks)))
+
+	// Format output based on format
+	if outputFormat == "json" {
 		output, err := json.MarshalIndent(tasks, "", "  ")
 		if err != nil {
-			return fmt.Errorf("failed to marshal tasks to JSON: %w", err)
+			display.ShowError(fmt.Sprintf("Failed to marshal tasks to JSON: %v", err))
+			return fmt.Errorf("failed to marshal tasks to JSON: %v", err)
 		}
 		fmt.Println(string(output))
 		return nil
 	}
 
-	if len(tasks) == 0 {
-		fmt.Println("No tasks found")
-		return nil
-	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "TASK ID\tREPOSITORY\tSTATUS\tSTART TIME\tEND TIME")
+	// Create table data
+	headers := []string{"TASK ID", "REPOSITORY", "STATUS", "START TIME", "END TIME"}
+	rows := make([][]string, 0, len(tasks))
 
 	for _, t := range tasks {
 		endTime := "-"
@@ -266,73 +265,244 @@ func psAction(c *cli.Context) error {
 			endTime = t.EndTime.Format("2006-01-02 15:04:05")
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		// Format status with color
+		status := t.Status
+		switch t.Status {
+		case "Completed":
+			status = pterm.FgGreen.Sprint(t.Status)
+		case "Failed":
+			status = pterm.FgRed.Sprint(t.Status)
+		case "Running":
+			status = pterm.FgBlue.Sprint(t.Status)
+		case "Cancelled":
+			status = pterm.FgYellow.Sprint(t.Status)
+		}
+
+		rows = append(rows, []string{
 			t.ID,
 			t.Repository,
-			t.Status,
+			status,
 			t.StartTime.Format("2006-01-02 15:04:05"),
 			endTime,
-		)
+		})
 	}
 
-	w.Flush()
+	// Print table
+	display.PrintResultTable(headers, rows)
 	return nil
 }
 
 func logsAction(c *cli.Context) error {
+	display := createDisplay(c)
+
 	if err := setup(c.String("config")); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
 	}
 
 	taskID := c.Args().First()
 	if taskID == "" {
+		display.ShowError("Task ID is required")
 		return fmt.Errorf("task ID is required")
 	}
 
+	// Start spinner
+	spinner := display.StartSpinner(fmt.Sprintf("Retrieving logs for task %s", taskID))
+
+	// Get task
+	task, err := taskManager.GetTask(taskID)
+	if err != nil {
+		spinner.Fail(fmt.Sprintf("Failed to get task: %v", err))
+		return fmt.Errorf("failed to get task: %v", err)
+	}
+
+	// Show task info
+	spinner.Success("Retrieved task information")
+	display.ShowHeader("Task Information")
+	display.ShowTaskInfo(task)
+
+	// Show logs
+	display.ShowHeader("Task Logs")
+
 	reader, err := taskManager.GetLogReader(taskID)
 	if err != nil {
-		return fmt.Errorf("failed to get logs: %w", err)
+		display.ShowError(fmt.Sprintf("Failed to get logs: %v", err))
+		return fmt.Errorf("failed to get logs: %v", err)
 	}
 	defer reader.Close()
 
-	// Copy log contents to stdout
-	if _, err := io.Copy(os.Stdout, reader); err != nil {
-		return fmt.Errorf("failed to read logs: %w", err)
-	}
+	follow := c.Bool("follow")
+	if follow {
+		// Follow logs (similar to tail -f)
+		offsetFile, err := os.CreateTemp("", "inspectre-log-offset")
+		if err != nil {
+			display.ShowError(fmt.Sprintf("Failed to create temp file: %v", err))
+			return fmt.Errorf("failed to create temp file: %v", err)
+		}
+		defer os.Remove(offsetFile.Name())
+		defer offsetFile.Close()
 
-	// TODO: Implement follow functionality
+		// Initial read
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			display.ShowError(fmt.Sprintf("Failed to read logs: %v", err))
+			return fmt.Errorf("failed to read logs: %v", err)
+		}
+
+		// Display initial content
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if line != "" {
+				fmt.Println(line)
+			}
+		}
+
+		// Store offset
+		offset := int64(len(data))
+		_, err = fmt.Fprintf(offsetFile, "%d", offset)
+		if err != nil {
+			display.ShowWarning(fmt.Sprintf("Failed to store offset: %v", err))
+		}
+
+		// Start following
+		display.ShowInfo("Following logs (press Ctrl+C to stop)...")
+
+		// Poll for changes
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// Check if task is still running
+				currentTask, err := taskManager.GetTask(taskID)
+				if err != nil {
+					display.ShowError(fmt.Sprintf("Failed to get task status: %v", err))
+					return fmt.Errorf("failed to get task status: %v", err)
+				}
+
+				// Reopen log reader
+				reader, err = taskManager.GetLogReader(taskID)
+				if err != nil {
+					display.ShowWarning(fmt.Sprintf("Failed to reopen log file: %v", err))
+					time.Sleep(1 * time.Second)
+					continue
+				}
+
+				// Seek to previous position
+				offsetFile.Seek(0, 0)
+				var storedOffset int64
+				_, err = fmt.Fscanf(offsetFile, "%d", &storedOffset)
+				if err != nil {
+					display.ShowWarning(fmt.Sprintf("Failed to read offset: %v", err))
+					storedOffset = 0
+				}
+
+				// Seek to stored offset
+				_, err = reader.(*os.File).Seek(storedOffset, 0)
+				if err != nil {
+					display.ShowWarning(fmt.Sprintf("Failed to seek in log file: %v", err))
+					reader.Close()
+					continue
+				}
+
+				// Read new content
+				newData, err := io.ReadAll(reader)
+				reader.Close()
+				if err != nil {
+					display.ShowWarning(fmt.Sprintf("Failed to read logs: %v", err))
+					continue
+				}
+
+				// Display new content
+				if len(newData) > 0 {
+					lines := strings.Split(string(newData), "\n")
+					for _, line := range lines {
+						if line != "" {
+							fmt.Println(line)
+						}
+					}
+
+					// Update offset
+					offset = storedOffset + int64(len(newData))
+					offsetFile.Truncate(0)
+					offsetFile.Seek(0, 0)
+					_, err = fmt.Fprintf(offsetFile, "%d", offset)
+					if err != nil {
+						display.ShowWarning(fmt.Sprintf("Failed to store offset: %v", err))
+					}
+				}
+
+				// Exit if task is finished
+				if currentTask.Status != "Running" && currentTask.Status != "Created" {
+					display.ShowInfo(fmt.Sprintf("Task %s is %s, stopping log follow", taskID, currentTask.Status))
+					return nil
+				}
+			case <-c.Context.Done():
+				display.ShowInfo("Stopped following logs")
+				return nil
+			}
+		}
+	} else {
+		// Just display logs once
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			display.ShowError(fmt.Sprintf("Failed to read logs: %v", err))
+			return fmt.Errorf("failed to read logs: %v", err)
+		}
+
+		// Display content
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if line != "" {
+				fmt.Println(line)
+			}
+		}
+	}
 
 	return nil
 }
 
 func reposAction(c *cli.Context) error {
+	display := createDisplay(c)
+
 	if err := setup(c.String("config")); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
 	}
+
+	outputFormat := c.String("output")
+
+	// Start spinner while retrieving repositories
+	spinner := display.StartSpinner("Retrieving repositories...")
 
 	repos, err := repoManager.ListRepositories()
 	if err != nil {
-		return fmt.Errorf("failed to list repositories: %w", err)
+		spinner.Fail(fmt.Sprintf("Failed to list repositories: %v", err))
+		return fmt.Errorf("failed to list repositories: %v", err)
 	}
 
-	jsonOutput := c.Bool("json")
+	if len(repos) == 0 {
+		spinner.Info("No repositories configured")
+		return nil
+	}
 
-	if jsonOutput {
+	spinner.Success(fmt.Sprintf("Found %d repositories", len(repos)))
+
+	// Format output based on format
+	if outputFormat == "json" {
 		output, err := json.MarshalIndent(repos, "", "  ")
 		if err != nil {
-			return fmt.Errorf("failed to marshal repositories to JSON: %w", err)
+			display.ShowError(fmt.Sprintf("Failed to marshal repositories to JSON: %v", err))
+			return fmt.Errorf("failed to marshal repositories to JSON: %v", err)
 		}
 		fmt.Println(string(output))
 		return nil
 	}
 
-	if len(repos) == 0 {
-		fmt.Println("No repositories configured")
-		return nil
-	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tURL\tTYPE\tAUTH")
+	// Create table data
+	headers := []string{"NAME", "URL", "TYPE", "AUTH"}
+	rows := make([][]string, 0, len(repos))
 
 	for _, repo := range repos {
 		authType := "none"
@@ -342,59 +512,125 @@ func reposAction(c *cli.Context) error {
 			authType = "user/pass"
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", repo.Name, repo.URL, repo.Type, authType)
+		rows = append(rows, []string{
+			repo.Name,
+			repo.URL,
+			repo.Type,
+			authType,
+		})
 	}
 
-	w.Flush()
+	// Print table
+	display.PrintResultTable(headers, rows)
 	return nil
 }
 
 func queryAction(c *cli.Context) error {
+	display := createDisplay(c)
+
 	if err := setup(c.String("config")); err != nil {
-		return fmt.Errorf("setup failed: %w", err)
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
 	}
 
 	query := c.String("sql")
 	outputFormat := c.String("output")
 
+	// Start spinner while executing query
+	spinner := display.StartSpinner(fmt.Sprintf("Executing query: %s", query))
+
 	results, err := storageManager.QueryMetrics(query)
 	if err != nil {
-		return fmt.Errorf("query failed: %w", err)
+		spinner.Fail(fmt.Sprintf("Query failed: %v", err))
+		return fmt.Errorf("query failed: %v", err)
 	}
 
 	if len(results) == 0 {
-		fmt.Println("No results found")
+		spinner.Info("No results found")
 		return nil
 	}
 
+	spinner.Success(fmt.Sprintf("Query returned %d results", len(results)))
+
+	// Format output based on format
 	if outputFormat == "json" {
 		output, err := json.MarshalIndent(results, "", "  ")
 		if err != nil {
-			return fmt.Errorf("failed to marshal results to JSON: %w", err)
+			display.ShowError(fmt.Sprintf("Failed to marshal results to JSON: %v", err))
+			return fmt.Errorf("failed to marshal results to JSON: %v", err)
 		}
 		fmt.Println(string(output))
 		return nil
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-
+	// Create table data
+	var headers []string
 	if len(results) > 0 {
-		var headers []string
 		for key := range results[0] {
 			headers = append(headers, key)
 		}
-		fmt.Fprintln(w, strings.Join(headers, "\t"))
 	}
 
+	rows := make([][]string, 0, len(results))
 	for _, row := range results {
 		var values []string
-		for key := range results[0] { // Use first row's keys to maintain order
+		for _, key := range headers {
 			val := row[key]
 			values = append(values, fmt.Sprintf("%v", val))
 		}
-		fmt.Fprintln(w, strings.Join(values, "\t"))
+		rows = append(rows, values)
 	}
 
-	w.Flush()
+	// Print table
+	display.PrintResultTable(headers, rows)
+	return nil
+}
+
+func cancelAction(c *cli.Context) error {
+	display := createDisplay(c)
+
+	if err := setup(c.String("config")); err != nil {
+		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
+		return fmt.Errorf("setup failed: %v", err)
+	}
+
+	taskID := c.Args().First()
+	if taskID == "" {
+		display.ShowError("Task ID is required")
+		return fmt.Errorf("task ID is required")
+	}
+
+	// Start spinner
+	spinner := display.StartSpinner(fmt.Sprintf("Cancelling task %s", taskID))
+
+	// Get task
+	task, err := taskManager.GetTask(taskID)
+	if err != nil {
+		spinner.Fail(fmt.Sprintf("Failed to get task: %v", err))
+		return fmt.Errorf("failed to get task: %v", err)
+	}
+
+	// Show task info
+	display.ShowTaskInfo(task)
+
+	// Confirm cancellation
+	if !c.Bool("yes") {
+		spinner.Warning("Cancellation requires confirmation")
+		confirmed := display.Confirm(fmt.Sprintf("Are you sure you want to cancel task %s?", taskID))
+		if !confirmed {
+			display.ShowInfo("Cancellation aborted")
+			return nil
+		}
+	}
+
+	// Cancel task
+	spinner.UpdateText(fmt.Sprintf("Cancelling task %s...", taskID))
+
+	if err := taskManager.CancelTask(taskID); err != nil {
+		spinner.Fail(fmt.Sprintf("Failed to cancel task: %v", err))
+		return fmt.Errorf("failed to cancel task: %v", err)
+	}
+
+	spinner.Success(fmt.Sprintf("Task %s cancelled", taskID))
 	return nil
 }
