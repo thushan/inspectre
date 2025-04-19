@@ -9,46 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/core/repository"
 	"github.com/urfave/cli/v2"
 )
 
 const PublicReadFilePerm = 0o644
 
-// InsightsCommands returns CLI commands for generating insights
-func InsightsCommands() []*cli.Command {
-	return []*cli.Command{
-		{
-			Name:      "insights",
-			Usage:     "Generate insights for a repository",
-			ArgsUsage: "<repository-name-or-url>",
-			Flags: []cli.Flag{
-				&cli.StringFlag{
-					Name:    "output",
-					Aliases: []string{"o"},
-					Usage:   "Output format (json, markdown, text)",
-					Value:   "text",
-				},
-				&cli.StringFlag{
-					Name:    "file",
-					Aliases: []string{"f"},
-					Usage:   "Output file path (default: stdout)",
-				},
-				&cli.StringFlag{
-					Name:    "config",
-					Aliases: []string{"c"},
-					Usage:   "Custom path for configuration data",
-				},
-				&cli.BoolFlag{
-					Name:  "force",
-					Usage: "Force re-analysis even if insights exist",
-				},
-			},
-			Action: insightsAction,
-		},
-	}
-}
 func insightsAction(c *cli.Context) error {
 	if err := setup(c.String("config")); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
@@ -141,7 +108,7 @@ func insightsAction(c *cli.Context) error {
 	}
 
 	logger("Initializing LLM analyser")
-	llmAnalyser := analysis.NewLLMAnalyser()
+	llmAnalyser := analyser.NewLLMAnalyser()
 
 	err = llmAnalyser.Initialize(repoPath, map[string]string{
 		"ASSETS_DIR": task.AssetsDir, // Pass assets directory to the analyser
@@ -177,7 +144,7 @@ func outputInsights(insightsPath, format, outputFile string) error {
 		return fmt.Errorf("failed to read insights file: %w", err)
 	}
 
-	var insights analysis.RepoInsights
+	var insights analyser.RepoInsights
 	if err := json.Unmarshal(data, &insights); err != nil {
 		return fmt.Errorf("failed to parse insights: %w", err)
 	}
@@ -207,7 +174,7 @@ func outputInsights(insightsPath, format, outputFile string) error {
 }
 
 // formatMarkdown formats insights as Markdown
-func formatMarkdown(insights *analysis.RepoInsights) string {
+func formatMarkdown(insights *analyser.RepoInsights) string {
 	var sb strings.Builder
 
 	sb.WriteString("# Repository Insights\n\n")
@@ -263,7 +230,7 @@ func formatMarkdown(insights *analysis.RepoInsights) string {
 }
 
 // formatText formats insights as plain text
-func formatText(insights *analysis.RepoInsights) string {
+func formatText(insights *analyser.RepoInsights) string {
 	var sb strings.Builder
 
 	sb.WriteString("REPOSITORY INSIGHTS\n\n")

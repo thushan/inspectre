@@ -35,57 +35,6 @@ func initExtensionManager(c *cli.Context) error {
 	return nil
 }
 
-// ExtensionCommands returns the CLI commands for extension management
-func ExtensionCommands() []*cli.Command {
-	return []*cli.Command{
-		{
-			Name:  "plugin",
-			Usage: "Manage analysis plugins",
-			Subcommands: []*cli.Command{
-				{
-					Name:  "list",
-					Usage: "List available plugins",
-					Flags: []cli.Flag{
-						&cli.StringFlag{
-							Name:  "type",
-							Usage: "Filter by plugin type (cli, python, golang)",
-						},
-						&cli.BoolFlag{
-							Name:  "json",
-							Usage: "Output in JSON format",
-						},
-					},
-					Action: listPluginsAction,
-				},
-				{
-					Name:      "enable",
-					Usage:     "Enable a plugin",
-					ArgsUsage: "<plugin-name>",
-					Action:    enablePluginAction,
-				},
-				{
-					Name:      "disable",
-					Usage:     "Disable a plugin",
-					ArgsUsage: "<plugin-name>",
-					Action:    disablePluginAction,
-				},
-				{
-					Name:      "info",
-					Usage:     "Show plugin details",
-					ArgsUsage: "<plugin-name>",
-					Flags: []cli.Flag{
-						&cli.BoolFlag{
-							Name:  "json",
-							Usage: "Output in JSON format",
-						},
-					},
-					Action: pluginInfoAction,
-				},
-			},
-		},
-	}
-}
-
 // listPluginsAction lists available plugins
 func listPluginsAction(c *cli.Context) error {
 	if err := initExtensionManager(c); err != nil {

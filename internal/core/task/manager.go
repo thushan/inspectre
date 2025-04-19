@@ -1,57 +1,134 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"sync"
-	"time"
-
-	"github.com/thushan/inspectre/internal/core/analysis"
+	appctx "github.com/thushan/inspectre/internal/core/context"
+	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/repository"
 	"github.com/thushan/inspectre/internal/extensions"
 	"github.com/thushan/inspectre/internal/storage"
+	"io"
+	"runtime"
+	"time"
+
+	"github.com/thushan/inspectre/internal/core/types"
+)
+
+// Task status constants
+const (
+	StatusCreated   = "Created"
+	StatusQueued    = "Queued"
+	StatusRunning   = "Running"
+	StatusCompleted = "Completed"
+	StatusFailed    = "Failed"
+	StatusCancelled = "Cancelled"
+
+	// Concurrency settings
+	MinWorkerCount = 2
+	MaxWorkerCount = 8
+
+	// Channel buffer sizes
+	TaskQueueSize  = 100
+	TaskResultSize = 100
+	UIEventSize    = 100
+
+	// Timeouts
+	ShutdownTimeout      = 10 * time.Second
+	TaskExecutionTimeout = 30 * time.Minute
+	CloneTimeout         = 10 * time.Minute
+
+	// Worker scaling
+	WorkerScaleInterval = 5 * time.Second
+	IdleWorkerTimeout   = 30 * time.Second
 )
 
 var (
 	ErrTaskNotFound       = errors.New("task not found")
 	ErrTaskAlreadyRunning = errors.New("task already running")
 	ErrInvalidTaskState   = errors.New("invalid task state")
+	ErrTaskCancelled      = errors.New("task was cancelled")
+	ErrManagerClosed      = errors.New("task manager is closed")
 )
-
-const (
-	StatusCreated   = "Created"
-	StatusRunning   = "Running"
-	StatusCompleted = "Completed"
-	StatusFailed    = "Failed"
-	StatusCancelled = "Cancelled"
-)
-
-// Manager handles analysis tasks
-type Manager struct {
-	repoManager      *repository.Manager
-	storageManager   *storage.Manager
-	extensionManager *extensions.Manager
-	tasks            map[string]*repository.Task
-	tasksMu          sync.RWMutex
-	logWriters       map[string]io.Writer
-	logMu            sync.RWMutex
-}
 
 // NewManager creates a new task manager
-func NewManager(repoManager *repository.Manager, storageManager *storage.Manager, extensionManager *extensions.Manager) *Manager {
-	return &Manager{
+func NewManager(repoManager *repository.Manager, storageManager *storage.Manager, extensionManager *extensions.Manager, appCtx *appctx.AppContext) *Manager {
+	// Create contexts for the manager and worker pool
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Set worker count based on number of CPU cores, with reasonable limits
+	cpuCount := runtime.NumCPU()
+	minWorkers := MinWorkerCount
+	if cpuCount < minWorkers {
+		minWorkers = cpuCount
+	}
+
+	maxWorkers := MaxWorkerCount
+	if cpuCount < maxWorkers {
+		maxWorkers = cpuCount
+	}
+
+	if minWorkers < 1 {
+		minWorkers = 1
+	}
+
+	manager := &Manager{
 		repoManager:      repoManager,
 		storageManager:   storageManager,
 		extensionManager: extensionManager,
-		tasks:            make(map[string]*repository.Task),
-		logWriters:       make(map[string]io.Writer),
+		tasks:            make(map[string]*types.Task),
+		ctx:              ctx,
+		cancelFunc:       cancel,
+		logger:           logging.GetLogger(),
+
+		// Channels sized to avoid blocking in normal scenarios
+		taskQueue:    make(chan *types.Task, TaskQueueSize),
+		taskResults:  make(chan TaskResult, TaskResultSize),
+		uiEvents:     make(chan UIEvent, UIEventSize),
+		workerStates: make(map[int]*WorkerState),
+
+		minWorkerCount: minWorkers,
+		maxWorkerCount: maxWorkers,
+		currentWorkers: 0,
+		closed:         false,
 	}
+
+	// Start background workers
+	manager.startWorkers()
+
+	// Start worker scaling goroutine
+	manager.startWorkerScaling()
+
+	// Handle task results and UI events
+	manager.startEventHandlers()
+
+	// Register shutdown hook if app context is provided
+	if appCtx != nil {
+		appCtx.AddShutdownHookWithPriority(
+			"taskmanager.shutdown",
+			appctx.PriorityNormal,
+			manager.Shutdown,
+		)
+	}
+
+	return manager
 }
 
-// CreateTask creates a new analysis task
-func (m *Manager) CreateTask(nameOrURL string) (*repository.Task, error) {
+// SetDisplay sets the display manager
+func (m *Manager) SetDisplay(display types.DisplayProvider) {
+	m.display = display
+}
+
+// CreateTask creates a new analyser task
+func (m *Manager) CreateTask(nameOrURL string) (*types.Task, error) {
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return nil, ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	task, err := m.repoManager.CreateTask(nameOrURL)
 	if err != nil {
 		return nil, err
@@ -66,6 +143,13 @@ func (m *Manager) CreateTask(nameOrURL string) (*repository.Task, error) {
 
 // StartTask begins a task's execution
 func (m *Manager) StartTask(taskID string) error {
+	m.closedMu.RLock()
+	if m.closed {
+		m.closedMu.RUnlock()
+		return ErrManagerClosed
+	}
+	m.closedMu.RUnlock()
+
 	m.tasksMu.Lock()
 	task, exists := m.tasks[taskID]
 	if !exists {
@@ -78,40 +162,70 @@ func (m *Manager) StartTask(taskID string) error {
 		return ErrInvalidTaskState
 	}
 
-	task.Status = StatusRunning
+	// Change status to queued
+	task.Status = StatusQueued
 	m.tasksMu.Unlock()
 
-	// Create required directories
-	if err := os.MkdirAll(task.BaseDir, 0755); err != nil {
-		return fmt.Errorf("failed to create base directory: %w", err)
+	// Ensure task log file is registered
+	if err := m.logger.RegisterTaskLog(task.ID, task.LogFile); err != nil {
+		m.logger.Warning("Failed to register task log: %v", err)
 	}
 
-	if err := os.MkdirAll(task.RepoDir, 0755); err != nil {
-		return fmt.Errorf("failed to create repository directory: %w", err)
+	// Log task start
+	m.logger.TaskInfo(task.ID, "Task queued at %s", time.Now().Format(time.RFC3339))
+
+	// Send to worker pool
+	select {
+	case m.taskQueue <- task:
+		// Successfully queued task
+		return nil
+	case <-m.ctx.Done():
+		// Manager is shutting down
+		return fmt.Errorf("task manager shutting down: %w", m.ctx.Err())
+	default:
+		// Queue full (should not happen with properly sized queue)
+		m.tasksMu.Lock()
+		task.Status = StatusCreated // Reset status
+		m.tasksMu.Unlock()
+		return fmt.Errorf("task queue is full")
+	}
+}
+
+// CancelTask cancels a running task
+func (m *Manager) CancelTask(taskID string) error {
+	m.tasksMu.Lock()
+	task, exists := m.tasks[taskID]
+	if !exists {
+		m.tasksMu.Unlock()
+		return ErrTaskNotFound
 	}
 
-	if err := os.MkdirAll(task.AssetsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create assets directory: %w", err)
+	// Only queued or running tasks can be cancelled
+	if task.Status != StatusQueued && task.Status != StatusRunning {
+		m.tasksMu.Unlock()
+		return ErrInvalidTaskState
 	}
 
-	logFile, err := os.OpenFile(task.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create log file: %w", err)
-	}
+	// Update status
+	prevStatus := task.Status
+	task.Status = StatusCancelled
+	task.EndTime = time.Now()
+	m.tasksMu.Unlock()
 
-	m.logMu.Lock()
-	m.logWriters[taskID] = logFile
-	m.logMu.Unlock()
+	m.logger.TaskInfo(taskID, "Task cancelled by user (previous status: %s)", prevStatus)
 
-	go func() {
-		m.runTask(task)
-	}()
+	// Send UI event
+	m.sendUIEvent(UIEvent{
+		TaskID:    taskID,
+		EventType: "cancelled",
+		Message:   "Task cancelled by user",
+	})
 
 	return nil
 }
 
 // GetTask retrieves a task by ID
-func (m *Manager) GetTask(taskID string) (*repository.Task, error) {
+func (m *Manager) GetTask(taskID string) (*types.Task, error) {
 	m.tasksMu.RLock()
 	defer m.tasksMu.RUnlock()
 
@@ -126,37 +240,27 @@ func (m *Manager) GetTask(taskID string) (*repository.Task, error) {
 }
 
 // ListTasks returns all tasks
-func (m *Manager) ListTasks(showAll, showFailed bool) []*repository.Task {
+func (m *Manager) ListTasks(showAll, showFailed bool) []*types.Task {
 	m.tasksMu.RLock()
 	defer m.tasksMu.RUnlock()
 
-	var result []*repository.Task
+	var result []*types.Task
 
 	for _, task := range m.tasks {
 		if showAll {
-			result = append(result, task)
+			// Make a copy to avoid concurrent modification
+			taskCopy := *task
+			result = append(result, &taskCopy)
 		} else if showFailed && task.Status == StatusFailed {
-			result = append(result, task)
-		} else if task.Status == StatusRunning || task.Status == StatusCreated {
-			result = append(result, task)
+			taskCopy := *task
+			result = append(result, &taskCopy)
+		} else if task.Status == StatusRunning || task.Status == StatusQueued || task.Status == StatusCreated {
+			taskCopy := *task
+			result = append(result, &taskCopy)
 		}
 	}
 
 	return result
-}
-
-// WriteLog writes a message to the task's log
-func (m *Manager) WriteLog(taskID, message string) error {
-	m.logMu.RLock()
-	writer, exists := m.logWriters[taskID]
-	m.logMu.RUnlock()
-
-	if !exists {
-		return ErrTaskNotFound
-	}
-
-	_, err := fmt.Fprintln(writer, message)
-	return err
 }
 
 // GetLogReader returns a reader for the task's log
@@ -169,13 +273,10 @@ func (m *Manager) GetLogReader(taskID string) (io.ReadCloser, error) {
 		return nil, ErrTaskNotFound
 	}
 
-	file, err := os.OpenFile(task.LogFile, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %w", err)
-	}
-
-	return file, nil
+	return m.logger.GetTaskLogReader(taskID, task.LogFile)
 }
+
+// CleanupTask removes all files associated with a task
 func (m *Manager) CleanupTask(taskID string) error {
 	m.tasksMu.RLock()
 	task, exists := m.tasks[taskID]
@@ -186,160 +287,91 @@ func (m *Manager) CleanupTask(taskID string) error {
 	}
 
 	// Make sure any log files are closed first
-	m.CloseTaskLog(taskID)
-
-	// Wait a bit to ensure all file handles are released
-	time.Sleep(100 * time.Millisecond)
+	m.logger.CloseTaskLog(taskID)
 
 	// Use repo manager to clean up
 	return m.repoManager.CleanUp(task)
 }
 
-// CloseTaskLog closes the log file for a task
-func (m *Manager) CloseTaskLog(taskID string) {
-	m.logMu.Lock()
-	defer m.logMu.Unlock()
+// Shutdown performs a graceful shutdown
+func (m *Manager) Shutdown(ctx context.Context) error {
+	var err error
 
-	if writer, exists := m.logWriters[taskID]; exists {
-		if closer, ok := writer.(io.Closer); ok {
-			_ = closer.Close() // Ignore error on close
+	m.shutdownOnce.Do(func() {
+		m.logger.Info("Shutting down task manager...")
+
+		// Mark as closed first to prevent new operations
+		m.closedMu.Lock()
+		m.closed = true
+		m.closedMu.Unlock()
+
+		// Create a child context with timeout if parent doesn't have one
+		shutdownCtx, cancel := context.WithTimeout(ctx, ShutdownTimeout)
+		defer cancel()
+
+		// Cancel all workers first
+		m.workersMu.Lock()
+		for _, worker := range m.workerStates {
+			worker.Cancel()
 		}
-		delete(m.logWriters, taskID)
-	}
-}
+		m.workersMu.Unlock()
+		m.logger.Info("All workers cancelled")
 
-// runTask performs the actual repository analysis
-func (m *Manager) runTask(task *repository.Task) {
-	logger := func(format string, args ...interface{}) {
-		message := fmt.Sprintf(format, args...)
-		m.WriteLog(task.ID, message)
-	}
-
-	// Set the task to running state
-	logger("Task started at %s", time.Now().Format(time.RFC3339))
-
-	// Get repository details
-	repo, err := m.repoManager.GetRepository(task.Repository)
-	if err != nil {
-		// Handle URLs that aren't in the config
-		if !isURL(task.Repository) {
-			m.markTaskFailed(task, fmt.Sprintf("Repository not found: %v", err))
-			return
-		}
-
-		// Create temporary repository object for direct URLs
-		repo = &repository.Repository{
-			URL:  task.Repository,
-			Type: repository.GuessRepoType(task.Repository),
-			Auth: repository.Auth{}, // Empty Auth struct
-		}
-	}
-
-	// Clone the repository to the repo directory
-	logger("Cloning repository %s to %s", repo.URL, task.RepoDir)
-	err = m.repoManager.Clone(repo, task.RepoDir)
-	if err != nil {
-		m.markTaskFailed(task, fmt.Sprintf("Failed to clone repository: %v", err))
-		return
-	}
-
-	// Run analysis
-	logger("Repository cloned successfully. Beginning analysis...")
-
-	// Create analyser list starting with built-in analysers
-	analysers := []analysis.Analyser{
-		analysis.NewFileAnalyser(),
-		analysis.NewGitAnalyser(),
-	}
-
-	// Add extension analysers if extension manager is available
-	if m.extensionManager != nil {
-		logger("Loading extensions...")
-		extAnalysers, err := m.extensionManager.LoadAllEnabled()
-		if err != nil {
-			logger("Warning: failed to load some extensions: %v", err)
-		}
-
-		if len(extAnalysers) > 0 {
-			analysers = append(analysers, extAnalysers...)
-			logger("Loaded %d extension analysers", len(extAnalysers))
-		}
-	}
-
-	analyserManager := analysis.NewManager(analysers, logger)
-
-	// Prepare environment variables for analysers
-	env := map[string]string{
-		"REPOSITORY_NAME": repo.Name,
-		"REPOSITORY_URL":  repo.URL,
-		"REPOSITORY_TYPE": repo.Type,
-		"TASK_ID":         task.ID,
-		"ASSETS_DIR":      task.AssetsDir, // Add assets dir to environment
-	}
-
-	logger("Running analysers on repository...")
-	// Use repo directory instead of work directory
-	results, err := analyserManager.AnalyseRepository(task.RepoDir, env)
-	if err != nil {
-		m.markTaskFailed(task, fmt.Sprintf("Analysis failed: %v", err))
-		return
-	}
-
-	logger("Analysis completed with %d result sets", len(results))
-	for _, result := range results {
-		logger("Analyser %s: %d metrics collected (success=%v)",
-			result.AnalyserName, len(result.Metrics), result.Success)
-
-		if !result.Success {
-			logger("Analyser %s failed: %s", result.AnalyserName, result.Error)
-			continue
-		}
-
-		for _, metric := range result.Metrics {
-			if metric.Key == "" {
-				logger("Metric: %s = %v", metric.Name, metric.Value)
-			} else {
-				logger("Metric: %s [%s] = %v", metric.Name, metric.Key, metric.Value)
+		// Update status of any running tasks
+		m.tasksMu.Lock()
+		for id, task := range m.tasks {
+			if task.Status == StatusRunning || task.Status == StatusQueued {
+				task.Status = StatusCancelled
+				task.EndTime = time.Now()
+				m.logger.TaskInfo(id, "Task cancelled during shutdown")
 			}
 		}
-	}
+		m.tasksMu.Unlock()
+		m.logger.Info("All running tasks marked as cancelled")
 
-	// Store results if storage manager is available
-	if m.storageManager != nil {
-		logger("Storing analysis results...")
-		if err := m.storageManager.StoreResults(task.ID, repo.URL, results); err != nil {
-			logger("Warning: failed to store results: %v", err)
-		} else {
-			logger("Results stored successfully")
+		// Close channels in the correct order to avoid deadlocks
+		// 1. Close task queue first to stop new tasks from being processed
+		close(m.taskQueue)
+		m.logger.Info("Task queue closed")
+
+		// 2. Wait briefly to allow workers to process final messages
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-shutdownCtx.Done():
+			err = fmt.Errorf("shutdown timed out while waiting for workers: %w", shutdownCtx.Err())
+			m.logger.Warning("Shutdown timeout while waiting for workers")
 		}
-	}
 
-	// Mark as completed
-	m.tasksMu.Lock()
-	task.Status = StatusCompleted
-	task.EndTime = time.Now()
-	m.tasksMu.Unlock()
+		// 3. Close result and event channels
+		close(m.taskResults)
+		close(m.uiEvents)
+		m.logger.Info("All channels closed")
 
-	logger("Task completed at %s", task.EndTime.Format(time.RFC3339))
+		// 4. Finally, cancel the main context
+		m.cancelFunc()
+		m.logger.Info("Main context cancelled")
 
-	m.CloseTaskLog(task.ID)
-}
+		// Wait for all goroutines to complete with timeout
+		waitCh := make(chan struct{})
+		go func() {
+			m.wg.Wait()
+			close(waitCh)
+		}()
 
-// markTaskFailed updates a task's status to failed
-func (m *Manager) markTaskFailed(task *repository.Task, errorMsg string) {
-	m.tasksMu.Lock()
-	task.Status = StatusFailed
-	task.Error = errorMsg
-	task.EndTime = time.Now()
-	m.tasksMu.Unlock()
+		select {
+		case <-waitCh:
+			m.logger.Info("All goroutines successfully terminated")
+		case <-shutdownCtx.Done():
+			err = fmt.Errorf("shutdown timed out waiting for goroutines: %w", shutdownCtx.Err())
+			m.logger.Warning("Timeout waiting for goroutines to terminate, some resources may leak")
+		}
 
-	m.WriteLog(task.ID, fmt.Sprintf("Task failed: %s", errorMsg))
-	m.WriteLog(task.ID, fmt.Sprintf("Task ended at %s", task.EndTime.Format(time.RFC3339)))
+		// Close task logs
+		for id := range m.tasks {
+			m.logger.CloseTaskLog(id)
+		}
+		m.logger.Info("All task logs closed")
+	})
 
-	m.CloseTaskLog(task.ID)
-}
-
-// isURL checks if a string is a URL
-func isURL(s string) bool {
-	return s != "" && (s[:7] == "http://" || s[:8] == "https://" || s[:4] == "git@")
+	return err
 }

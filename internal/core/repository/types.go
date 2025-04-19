@@ -1,48 +1,71 @@
 package repository
 
 import (
+	"context"
+	"github.com/go-git/go-git/v5"
+	"github.com/thushan/inspectre/internal/core/logging"
+	"github.com/thushan/inspectre/internal/core/types"
+	"sync"
 	"time"
 )
 
-// Repository defines a code repository configuration
-type Repository struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	Type string `json:"type"` // github, gitlab, bitbucket
-	Auth Auth   `json:"auth"`
+// timeNow is a separate function to make testing easier
+var timeNow = func() time.Time {
+	return time.Now()
 }
 
-// Auth contains authentication details for repository access
-type Auth struct {
-	Username string `json:"username,omitempty"`
-	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
+// CloneProgress wraps progress notifications from git operations
+type CloneProgress struct {
+	Message string
+	Current int64
+	Total   int64
 }
 
-// Config defines the structure of the repositories.json file
-type Config struct {
-	Version      int          `json:"version"`
-	Repositories []Repository `json:"repositories"`
+// RepoCache caches repository metadata
+type RepoCache struct {
+	Repo      *git.Repository
+	LastUsed  time.Time
+	ClonePath string
 }
+
+// Manager implements the RepositoryManager interface
+type Manager struct {
+	configPath   string
+	config       *Config
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancelFunc   context.CancelFunc
+	logger       *logging.Logger
+	display      types.DisplayProvider
+	tempDir      string
+	shutdownOnce sync.Once
+	wg           sync.WaitGroup
+	closed       bool
+	closedMu     sync.RWMutex
+
+	// Cache for repositories
+	repoCache   map[string]*RepoCache
+	repoCacheMu sync.RWMutex
+}
+
+// progressWriter is a helper to relay Git clone progress to the display
+type progressWriter struct {
+	ch chan<- CloneProgress
+}
+
+// Use the common Task type from types package
+type Task = types.Task
+
+// Use the common Repository type from types package
+type Repository = types.Repository
+
+// Use the common Auth type from types package
+type Auth = types.Auth
+
+// Use the common Config type from types package
+type Config = types.Config
 
 // RepositoryManager handles repository operations
 type RepositoryManager interface {
-	GetRepository(nameOrURL string) (*Repository, error)
-	ListRepositories() ([]Repository, error)
-	Clone(repo *Repository, targetDir string) error
-	CleanUp(targetDir string) error
-}
-
-// Task represents a running analysis task
-type Task struct {
-	ID         string    `json:"id"`
-	Repository string    `json:"repository"` // Repository URL or name
-	Status     string    `json:"status"`     // Created, Running, Completed, Foiled
-	StartTime  time.Time `json:"start_time"`
-	EndTime    time.Time `json:"end_time,omitempty"`
-	BaseDir    string    `json:"base_dir"`   // Base directory for all task files
-	RepoDir    string    `json:"repo_dir"`   // Directory where repo is cloned
-	AssetsDir  string    `json:"assets_dir"` // Directory for storing assets/results
-	LogFile    string    `json:"log_file"`   // Path to log file
-	Error      string    `json:"error,omitempty"`
+	types.RepositoryManager
 }

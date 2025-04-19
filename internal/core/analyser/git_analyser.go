@@ -1,4 +1,4 @@
-package analysis
+package analyser
 
 import (
 	"fmt"
@@ -48,7 +48,7 @@ func (a *GitAnalyser) Initialize(repoPath string, env map[string]string) error {
 	return nil
 }
 
-// Run performs the analysis
+// Run performs the analyser
 func (a *GitAnalyser) Run() ([]Metric, error) {
 	var metrics []Metric
 	now := time.Now()
