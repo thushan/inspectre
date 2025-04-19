@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/extensions/cli"
 	"github.com/thushan/inspectre/internal/extensions/python"
 )
@@ -47,13 +47,13 @@ type Extension struct {
 
 // CachedAnalyser holds an analyser with caching information
 type CachedAnalyser struct {
-	Analyser  analysis.Analyser
+	Analyser  analyser.Analyser
 	CreatedAt int64 // Unix timestamp
 }
 
 // AnalyserFactory creates analysers of specific types
 type AnalyserFactory interface {
-	Create(ext *Extension) (analysis.Analyser, error)
+	Create(ext *Extension) (analyser.Analyser, error)
 }
 
 // Manager handles loading and running extensions
@@ -69,14 +69,14 @@ type Manager struct {
 // CLIAnalyserFactory creates CLI analysers
 type CLIAnalyserFactory struct{}
 
-func (f *CLIAnalyserFactory) Create(ext *Extension) (analysis.Analyser, error) {
+func (f *CLIAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error) {
 	return cli.NewCLIAnalyser(ext.Name, ext.Path, ext.Config), nil
 }
 
 // PythonAnalyserFactory creates Python analysers
 type PythonAnalyserFactory struct{}
 
-func (f *PythonAnalyserFactory) Create(ext *Extension) (analysis.Analyser, error) {
+func (f *PythonAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error) {
 	return python.NewPythonAnalyser(ext.Name, ext.Path, ext.Config), nil
 }
 
@@ -85,7 +85,7 @@ type GolangAnalyserFactory struct {
 	ExtensionsDir string
 }
 
-func (f *GolangAnalyserFactory) Create(ext *Extension) (analysis.Analyser, error) {
+func (f *GolangAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error) {
 	// Resolve path
 	path := ext.Path
 	if !filepath.IsAbs(path) {
@@ -105,7 +105,7 @@ func (f *GolangAnalyserFactory) Create(ext *Extension) (analysis.Analyser, error
 	}
 
 	// Assert that the symbol is an Analyser
-	analyser, ok := sym.(analysis.Analyser)
+	analyser, ok := sym.(analyser.Analyser)
 	if !ok {
 		return nil, ErrInvalidExtension
 	}
@@ -131,7 +131,7 @@ func NewManager(extensionsDir string) *Manager {
 }
 
 // LoadExtension loads an extension by name
-func (m *Manager) LoadExtension(name string) (analysis.Analyser, error) {
+func (m *Manager) LoadExtension(name string) (analyser.Analyser, error) {
 	// Check cache first
 	m.cacheMu.RLock()
 	if cached, ok := m.analyserCache[name]; ok {
@@ -180,8 +180,8 @@ func (m *Manager) LoadExtension(name string) (analysis.Analyser, error) {
 }
 
 // LoadAllEnabled loads all enabled extensions
-func (m *Manager) LoadAllEnabled() ([]analysis.Analyser, error) {
-	var analysers []analysis.Analyser
+func (m *Manager) LoadAllEnabled() ([]analyser.Analyser, error) {
+	var analysers []analyser.Analyser
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var loadErrors []error

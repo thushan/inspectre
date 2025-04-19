@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 // Analyser implements an analyser that runs external CLI tools
@@ -53,7 +53,7 @@ func (a *Analyser) Initialize(repoPath string, env map[string]string) error {
 }
 
 // Run executes the CLI tool and collects metrics
-func (a *Analyser) Run() ([]analysis.Metric, error) {
+func (a *Analyser) Run() ([]analyser.Metric, error) {
 	// Prepare command
 	cmd := exec.Command(a.execPath, a.repoPath)
 
@@ -79,13 +79,13 @@ func (a *Analyser) Run() ([]analysis.Metric, error) {
 	}
 
 	// Parse output as JSON metrics
-	var metrics []analysis.Metric
+	var metrics []analyser.Metric
 
 	// Try to parse the output as JSON metrics
 	output := stdout.String()
 	if err := json.Unmarshal([]byte(output), &metrics); err != nil {
 		// If not JSON, create a simple metric with the raw output
-		metrics = []analysis.Metric{
+		metrics = []analyser.Metric{
 			{
 				Name:      fmt.Sprintf("%s_output", a.name),
 				Value:     strings.TrimSpace(output),

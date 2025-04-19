@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pterm/pterm"
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/types"
 )
@@ -273,7 +273,7 @@ func (d *Display) handleEvent(event UIEvent) {
 
 	case EventShowResults:
 		logger.Debug("Showing results")
-		if results, ok := event.Data.([]*analysis.Result); ok {
+		if results, ok := event.Data.([]*analyser.Result); ok {
 			d.showResultsInternal(results)
 		} else {
 			logger.Warning("Invalid results data received for EventShowResults")
@@ -397,8 +397,8 @@ func (d *Display) ShowTaskInfo(task *types.Task) {
 	d.queueEvent(EventShowTaskInfo, "", task)
 }
 
-// ShowResults displays analysis results
-func (d *Display) ShowResults(results []*analysis.Result) {
+// ShowResults displays analyser results
+func (d *Display) ShowResults(results []*analyser.Result) {
 	d.queueEvent(EventShowResults, "", results)
 }
 
@@ -655,7 +655,7 @@ func (d *Display) showTaskInfoInternal(task *types.Task) {
 	fmt.Println()
 }
 
-func (d *Display) showResultsInternal(results []*analysis.Result) {
+func (d *Display) showResultsInternal(results []*analyser.Result) {
 	if d.options.Quiet {
 		return
 	}

@@ -640,7 +640,7 @@ func (m *Manager) getAuthMethod(repo *Repository) (transport.AuthMethod, error) 
 	}
 }
 
-// CreateTask creates a new analysis task
+// CreateTask creates a new analyser task
 func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
 	// Check if manager is closed
 	m.closedMu.RLock()

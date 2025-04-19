@@ -17,7 +17,7 @@ func CoreCommands() []*cli.Command {
 	return []*cli.Command{
 		{
 			Name:      "run",
-			Usage:     "Run analysis on a repository",
+			Usage:     "Run analyser on a repository",
 			ArgsUsage: "<repository-name-or-url>",
 			Flags: []cli.Flag{
 				outputFormatFlag,
@@ -70,7 +70,7 @@ func CoreCommands() []*cli.Command {
 		},
 		{
 			Name:  "query",
-			Usage: "Query analysis results",
+			Usage: "Query analyser results",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:    "sql",

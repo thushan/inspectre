@@ -102,7 +102,7 @@ type Analyser interface {
     // Initializes the analyser with repository context
     Initialize(repoPath string, env map[string]string) error
     
-    // Performs the core analysis
+    // Performs the core analyser
     Run() ([]Metric, error)
     
     // Handles resource cleanup

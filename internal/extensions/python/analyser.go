@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 // PythonAnalyser implements an analyser that runs Python scripts
@@ -70,7 +70,7 @@ func (a *PythonAnalyser) Initialize(repoPath string, env map[string]string) erro
 }
 
 // Run executes the Python script and collects metrics
-func (a *PythonAnalyser) Run() ([]analysis.Metric, error) {
+func (a *PythonAnalyser) Run() ([]analyser.Metric, error) {
 	// Prepare command
 	cmd := exec.Command(a.pythonPath, a.scriptPath, a.repoPath)
 
@@ -104,13 +104,13 @@ func (a *PythonAnalyser) Run() ([]analysis.Metric, error) {
 	}
 
 	// Parse output as JSON metrics
-	var metrics []analysis.Metric
+	var metrics []analyser.Metric
 
 	// Try to parse the output as JSON metrics
 	output := stdout.String()
 	if err := json.Unmarshal([]byte(output), &metrics); err != nil {
 		// If not JSON, create a simple metric with the raw output
-		metrics = []analysis.Metric{
+		metrics = []analyser.Metric{
 			{
 				Name:      fmt.Sprintf("%s_output", a.name),
 				Value:     strings.TrimSpace(output),

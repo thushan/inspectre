@@ -149,7 +149,7 @@ inspectre plugin info <plugin-name>
 ### Querying Results
 
 ```bash
-# Query analysis results
+# Query analyser results
 inspectre query --sql "SELECT * FROM metrics LIMIT 10"
 
 # Output as JSON
@@ -219,7 +219,7 @@ inspectre run repo1 repo2 repo3
 
 ### Advanced Querying
 ```bash
-# Complex metric analysis
+# Complex metric analyser
 inspectre query --sql "
   SELECT language, AVG(complexity) as avg_complexity 
   FROM metrics 

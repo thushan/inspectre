@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 var (
@@ -18,13 +18,13 @@ var (
 	ErrNotImplemented     = errors.New("not implemented")
 )
 
-// Storage represents a storage backend for analysis results
+// Storage represents a storage backend for analyser results
 type Storage interface {
 	// Initialize sets up the storage backend
 	Initialize() error
 
-	// StoreResults saves analysis results
-	StoreResults(taskID string, repository string, results []*analysis.Result) error
+	// StoreResults saves analyser results
+	StoreResults(taskID string, repository string, results []*analyser.Result) error
 
 	// QueryMetrics retrieves metrics based on a query
 	QueryMetrics(query string) ([]map[string]interface{}, error)
@@ -55,8 +55,8 @@ func (s *DuckDBStorage) Initialize() error {
 	return nil
 }
 
-// StoreResults saves analysis results
-func (s *DuckDBStorage) StoreResults(taskID string, repository string, results []*analysis.Result) error {
+// StoreResults saves analyser results
+func (s *DuckDBStorage) StoreResults(taskID string, repository string, results []*analyser.Result) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -129,8 +129,8 @@ func (s *FileStorage) Initialize() error {
 	return nil
 }
 
-// StoreResults saves analysis results to JSON files
-func (s *FileStorage) StoreResults(taskID string, repository string, results []*analysis.Result) error {
+// StoreResults saves analyser results to JSON files
+func (s *FileStorage) StoreResults(taskID string, repository string, results []*analyser.Result) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

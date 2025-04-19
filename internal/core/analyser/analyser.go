@@ -1,4 +1,4 @@
-package analysis
+package analyser
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 var (
 	ErrInvalidRepoPath  = errors.New("invalid repository path")
 	ErrNoAnalysersFound = errors.New("no analysers found")
-	ErrAnalysisFailed   = errors.New("analysis failed")
+	ErrAnalysisFailed   = errors.New("analyser failed")
 )
 
 // Metric represents a single measurement from an analyser
@@ -23,7 +23,7 @@ type Metric struct {
 	Timestamp time.Time         `json:"timestamp"`
 }
 
-// Result contains the output of an analysis run
+// Result contains the output of an analyser run
 type Result struct {
 	AnalyserName string    `json:"analyser_name"`
 	Repository   string    `json:"repository"`
@@ -42,20 +42,20 @@ type Analyser interface {
 	// Initialize prepares the analyser with the repository path and environment
 	Initialize(repoPath string, env map[string]string) error
 
-	// Run performs the analysis and returns metrics
+	// Run performs the analyser and returns metrics
 	Run() ([]Metric, error)
 
 	// Cleanup performs any necessary cleanup
 	Cleanup() error
 }
 
-// Manager coordinates analysis operations
+// Manager coordinates analyser operations
 type Manager struct {
 	analysers []Analyser
 	logger    func(format string, args ...interface{})
 }
 
-// NewManager creates a new analysis manager
+// NewManager creates a new analyser manager
 func NewManager(analysers []Analyser, logger func(format string, args ...interface{})) *Manager {
 	if logger == nil {
 		logger = func(format string, args ...interface{}) {
@@ -103,7 +103,7 @@ func (m *Manager) AnalyseRepository(repoPath string, env map[string]string) ([]*
 			continue
 		}
 
-		// Run analysis
+		// Run analyser
 		metrics, err := analyser.Run()
 		if err != nil {
 			result.Error = fmt.Sprintf("Execution failed: %v", err)

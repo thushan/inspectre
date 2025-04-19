@@ -86,7 +86,7 @@ Here are some basic commands and operations, for indepth documentation, see [usa
 
 ### Basic Analysis
 ```bash
-# Run repository analysis
+# Run repository analyser
 inspectre run <repo-url>
 
 # Generate insights

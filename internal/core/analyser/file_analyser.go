@@ -1,4 +1,4 @@
-package analysis
+package analyser
 
 import (
 	"fmt"
@@ -33,7 +33,7 @@ const (
 	FileBatchSize = 100
 )
 
-// DefaultExcludeDirs contains default directories to exclude from analysis
+// DefaultExcludeDirs contains default directories to exclude from analyser
 var DefaultExcludeDirs = []string{GitDir, NodeModulesDir, VendorDir, IDEADir, VSCodeDir}
 
 // FileInfo contains information about a file
@@ -83,7 +83,7 @@ func (a *FileAnalyser) Initialize(repoPath string, env map[string]string) error 
 	return nil
 }
 
-// Run performs the analysis with parallelization
+// Run performs the analyser with parallelization
 func (a *FileAnalyser) Run() ([]Metric, error) {
 	// Create channels for worker pool
 	filesChan := make(chan FileInfo, FileChannelSize)

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/repository"
@@ -67,7 +67,7 @@ type UIEvent struct {
 type TaskResult struct {
 	TaskID      string
 	Repository  string
-	Results     []*analysis.Result
+	Results     []*analyser.Result
 	Error       error
 	CompletedAt time.Time
 }
@@ -81,7 +81,7 @@ type WorkerState struct {
 	Cancel    context.CancelFunc
 }
 
-// Manager handles analysis tasks
+// Manager handles analyser tasks
 type Manager struct {
 	repoManager      *repository.Manager
 	storageManager   *storage.Manager
@@ -416,7 +416,7 @@ func (m *Manager) setWorkerIdle(workerID int, idle bool) {
 	}
 }
 
-// executeTask performs the actual repository analysis
+// executeTask performs the actual repository analyser
 func (m *Manager) executeTask(task *types.Task) TaskResult {
 	// Create task-specific context that can be cancelled
 	taskCtx, taskCancel := context.WithTimeout(m.ctx, TaskExecutionTimeout)
@@ -467,8 +467,8 @@ func (m *Manager) executeTask(task *types.Task) TaskResult {
 		return result
 	}
 
-	// Run analysis
-	m.logger.TaskInfo(task.ID, "Repository cloned successfully. Beginning analysis...")
+	// Run analyser
+	m.logger.TaskInfo(task.ID, "Repository cloned successfully. Beginning analyser...")
 
 	// Send UI event
 	m.sendUIEvent(UIEvent{
@@ -486,7 +486,7 @@ func (m *Manager) executeTask(task *types.Task) TaskResult {
 	}
 
 	// Set up analyser manager
-	analyserManager := analysis.NewManager(analysers, loggerFn)
+	analyserManager := analyser.NewManager(analysers, loggerFn)
 
 	// Prepare environment variables for analysers
 	env := m.createAnalyserEnvironment(task, repo)
@@ -502,7 +502,7 @@ func (m *Manager) executeTask(task *types.Task) TaskResult {
 
 	results, err := analyserManager.AnalyseRepository(task.RepoDir, env)
 	if err != nil {
-		result.Error = fmt.Errorf("analysis failed: %w", err)
+		result.Error = fmt.Errorf("analyser failed: %w", err)
 		return result
 	}
 
@@ -554,11 +554,11 @@ func (m *Manager) ensureTaskDirectories(task *types.Task) error {
 }
 
 // prepareAnalysers creates the list of analysers to run
-func (m *Manager) prepareAnalysers(task *types.Task) []analysis.Analyser {
+func (m *Manager) prepareAnalysers(task *types.Task) []analyser.Analyser {
 	// Create analyser list starting with built-in analysers
-	analysers := []analysis.Analyser{
-		analysis.NewFileAnalyser(),
-		analysis.NewGitAnalyser(),
+	analysers := []analyser.Analyser{
+		analyser.NewFileAnalyser(),
+		analyser.NewGitAnalyser(),
 	}
 
 	// Add extension analysers if extension manager is available
@@ -627,7 +627,7 @@ func (m *Manager) processTaskResult(result TaskResult) {
 
 	// Store results if successful and storage manager is available
 	if result.Error == nil && m.storageManager != nil && result.Results != nil {
-		m.logger.TaskInfo(task.ID, "Storing analysis results...")
+		m.logger.TaskInfo(task.ID, "Storing analyser results...")
 
 		if err := m.storageManager.StoreResults(task.ID, result.Repository, result.Results); err != nil {
 			m.logger.TaskWarning(task.ID, "Warning: failed to store results: %v", err)
@@ -662,7 +662,7 @@ func (m *Manager) handleUIEvent(event UIEvent) {
 
 	case "completed":
 		m.display.StopSpinner(fmt.Sprintf("[%s] Analysis completed successfully", event.TaskID))
-		if results, ok := event.Data.([]*analysis.Result); ok {
+		if results, ok := event.Data.([]*analyser.Result); ok {
 			m.display.ShowResults(results)
 		}
 
@@ -696,7 +696,7 @@ func (m *Manager) SetDisplay(display types.DisplayProvider) {
 	m.display = display
 }
 
-// CreateTask creates a new analysis task
+// CreateTask creates a new analyser task
 func (m *Manager) CreateTask(nameOrURL string) (*types.Task, error) {
 	m.closedMu.RLock()
 	if m.closed {

@@ -40,7 +40,7 @@ func ExtensionCommands() []*cli.Command {
 	return []*cli.Command{
 		{
 			Name:  "plugin",
-			Usage: "Manage analysis plugins",
+			Usage: "Manage analyser plugins",
 			Subcommands: []*cli.Command{
 				{
 					Name:  "list",

@@ -8,7 +8,7 @@ import (
 var (
 	Name        = "inspectre"
 	Authors     = "Thushan Fernando"
-	Description = "A code analysis tool to inspect repositories"
+	Description = "A code analyser tool to inspect repositories"
 	Version     = "v2.0.25"
 	Commit      = "none"
 	Date        = "nowish"
