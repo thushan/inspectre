@@ -1,7 +1,7 @@
 package types
 
 import (
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 	"time"
 )
 import "io"
@@ -16,7 +16,7 @@ type DisplayProvider interface {
 	ShowWarning(message string)
 	ShowError(message string)
 	Confirm(message string) bool
-	ShowResults(results []*analysis.Result)
+	ShowResults(results []*analyser.Result)
 	ShowHeader(title string)
 	ShowTaskInfo(task *Task)
 	PrintResultTable(headers []string, rows [][]string)
@@ -39,6 +39,7 @@ type TaskManager interface {
 	ListTasks(showAll, showFailed bool) []*Task
 	GetLogReader(taskID string) (io.ReadCloser, error)
 	CancelTask(taskID string) error
+	SetDisplay(display DisplayProvider)
 }
 
 // RepositoryManager defines the interface for repository operations
@@ -47,9 +48,11 @@ type RepositoryManager interface {
 	ListRepositories() ([]Repository, error)
 	Clone(repo *Repository, targetDir string) error
 	CleanUp(task *Task) error
+	SetDisplay(display DisplayProvider)
+	CreateTask(nameOrURL string) (*Task, error)
 }
 
-// Task represents a running analysis task
+// Task represents a running analyser task
 type Task struct {
 	ID         string    `json:"id"`
 	Repository string    `json:"repository"` // Repository URL or name

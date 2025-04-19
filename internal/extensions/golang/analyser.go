@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"plugin"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 // PluginAnalyser wraps a Go plugin implementing the Analyser interface
 type PluginAnalyser struct {
 	name     string
 	path     string
-	analyser analysis.Analyser
+	analyser analyser.Analyser
 	config   map[string]string
 }
 
@@ -52,7 +52,7 @@ func (a *PluginAnalyser) Initialize(repoPath string, env map[string]string) erro
 }
 
 // Run executes the analyser plugin
-func (a *PluginAnalyser) Run() ([]analysis.Metric, error) {
+func (a *PluginAnalyser) Run() ([]analyser.Metric, error) {
 	return a.analyser.Run()
 }
 
@@ -87,7 +87,7 @@ func (a *PluginAnalyser) loadPlugin() error {
 	}
 
 	// Assert that the symbol is an Analyser
-	analyser, ok := sym.(analysis.Analyser)
+	analyser, ok := sym.(analyser.Analyser)
 	if !ok {
 		return fmt.Errorf("exported 'Analyser' is not an Analyser interface")
 	}

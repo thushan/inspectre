@@ -1,4 +1,4 @@
-package analysis
+package analyser
 
 import (
 	"bytes"
@@ -93,7 +93,7 @@ func (a *LLMAnalyser) Initialize(repoPath string, env map[string]string) error {
 	return nil
 }
 
-// Run performs the analysis
+// Run performs the analyser
 func (a *LLMAnalyser) Run() ([]Metric, error) {
 	// TODO: This would be implemented to call the LLM API
 	// For now, return a placeholder metric
@@ -106,7 +106,7 @@ func (a *LLMAnalyser) Run() ([]Metric, error) {
 	}, nil
 }
 
-// AnalyseRepository performs a full repository analysis
+// AnalyseRepository performs a full repository analyser
 func (a *LLMAnalyser) AnalyseRepository(repoPath string) (*RepoInsights, error) {
 	if a.apiKey == "" {
 		return nil, fmt.Errorf("LLM API key not set, please set INSPECTRE_LLM_API_KEY environment variable")
@@ -142,7 +142,7 @@ func (a *LLMAnalyser) AnalyseRepository(repoPath string) (*RepoInsights, error) 
 	return insights, nil
 }
 
-// selectImportantFiles selects the most relevant files for analysis
+// selectImportantFiles selects the most relevant files for analyser
 func (a *LLMAnalyser) selectImportantFiles(repoPath string) ([]string, error) {
 	importantPatterns := []string{
 		"README.md", "README", "readme.md",
@@ -250,7 +250,7 @@ func (a *LLMAnalyser) callLLMAPI(prompt string) (*RepoInsights, error) {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a code analysis assistant that provides insights about repositories.",
+				"content": "You are a code analyser assistant that provides insights about repositories.",
 			},
 			{
 				"role":    "user",
@@ -347,7 +347,7 @@ func (a *LLMAnalyser) Cleanup() error {
 	return nil
 }
 
-// RepoInsights contains the analysis results
+// RepoInsights contains the analyser results
 type RepoInsights struct {
 	Summary            string                 `json:"summary"`
 	KeyFindings        []string               `json:"key_findings"`

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 var (
@@ -64,8 +64,8 @@ func (m *Manager) SetStorageType(storageType string) error {
 	return nil
 }
 
-// StoreResults saves analysis results
-func (m *Manager) StoreResults(taskID, repository string, results []*analysis.Result) error {
+// StoreResults saves analyser results
+func (m *Manager) StoreResults(taskID, repository string, results []*analyser.Result) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

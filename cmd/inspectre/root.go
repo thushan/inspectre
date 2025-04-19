@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"sort"
 	"time"
 
@@ -91,6 +92,16 @@ func NewApp(appCtx *appctx.AppContext) *cli.App {
 				logging.GetLogger().SetLogLevel(logging.LevelError)
 			}
 
+			// Create a display early for global use
+			globalDisplay := createDisplay(c)
+			logger.Info("Global display created")
+
+			// Perform initial setup
+			if err := setup(c.String("config")); err != nil {
+				globalDisplay.ShowError(fmt.Sprintf("Initial setup failed: %v", err))
+				return err
+			}
+
 			return nil
 		},
 		Commands: []*cli.Command{},
@@ -131,6 +142,8 @@ func getOutputOptions(c *cli.Context) ui.DisplayOptions {
 // createDisplay creates a display manager from CLI context
 func createDisplay(c *cli.Context) types.DisplayProvider {
 	display := ui.NewDisplay(getOutputOptions(c))
+	logger.Info("Created new display with options: NoColor=%v, Format=%s, Quiet=%v",
+		c.Bool("no-color"), c.String("output"), c.Bool("quiet"))
 	updateManagersWithDisplay(display)
 	return display
 }

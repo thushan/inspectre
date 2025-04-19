@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pterm/pterm"
-	"github.com/thushan/inspectre/internal/core/analysis"
+	"github.com/thushan/inspectre/internal/core/analyser"
 )
 
 // FormatOptions represents formatting options
@@ -16,8 +16,8 @@ type FormatOptions struct {
 	Format  string // "table", "json", "text"
 }
 
-// FormatResults formats analysis results for display
-func FormatResults(results []*analysis.Result, options FormatOptions) string {
+// FormatResults formats analyser results for display
+func FormatResults(results []*analyser.Result, options FormatOptions) string {
 	switch options.Format {
 	case "json":
 		return formatResultsAsJSON(results)
@@ -29,7 +29,7 @@ func FormatResults(results []*analysis.Result, options FormatOptions) string {
 }
 
 // formatResultsAsJSON formats results as JSON
-func formatResultsAsJSON(results []*analysis.Result) string {
+func formatResultsAsJSON(results []*analyser.Result) string {
 	data, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		return fmt.Sprintf("Error formatting results: %v", err)
@@ -38,7 +38,7 @@ func formatResultsAsJSON(results []*analysis.Result) string {
 }
 
 // formatResultsAsText formats results as human-readable text
-func formatResultsAsText(results []*analysis.Result, noColor bool) string {
+func formatResultsAsText(results []*analyser.Result, noColor bool) string {
 	var builder strings.Builder
 
 	for i, result := range results {
@@ -73,7 +73,7 @@ func formatResultsAsText(results []*analysis.Result, noColor bool) string {
 		builder.WriteString(fmt.Sprintf("Metrics: %d\n\n", len(result.Metrics)))
 
 		// Group metrics by name
-		metricsByName := make(map[string][]analysis.Metric)
+		metricsByName := make(map[string][]analyser.Metric)
 		for _, metric := range result.Metrics {
 			metricsByName[metric.Name] = append(metricsByName[metric.Name], metric)
 		}
@@ -115,7 +115,7 @@ func formatResultsAsText(results []*analysis.Result, noColor bool) string {
 }
 
 // formatResultsAsTable formats results as a table
-func formatResultsAsTable(results []*analysis.Result, noColor bool) string {
+func formatResultsAsTable(results []*analyser.Result, noColor bool) string {
 	var builder strings.Builder
 
 	for i, result := range results {
@@ -150,7 +150,7 @@ func formatResultsAsTable(results []*analysis.Result, noColor bool) string {
 		builder.WriteString(fmt.Sprintf("Metrics: %d\n\n", len(result.Metrics)))
 
 		// Group metrics by name
-		metricsByName := make(map[string][]analysis.Metric)
+		metricsByName := make(map[string][]analyser.Metric)
 		for _, metric := range result.Metrics {
 			metricsByName[metric.Name] = append(metricsByName[metric.Name], metric)
 		}
@@ -295,7 +295,7 @@ func formatDuration(d time.Duration) string {
 }
 
 // FormatMetric formats a single metric for display
-func FormatMetric(metric analysis.Metric, noColor bool) string {
+func FormatMetric(metric analyser.Metric, noColor bool) string {
 	var builder strings.Builder
 
 	valueStr := formatValue(metric.Value)
