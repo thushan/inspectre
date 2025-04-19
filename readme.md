@@ -1,15 +1,15 @@
 # Inspectre
 
-**Inspectre** is a modular and extensible repository analysis tool built in Go. It orchestrates the process of connecting to Git repositories, performing deep analysis, and generating comprehensive reports.
+**Inspectre** is a modular and extensible repository analysis tool built in Go. It provides comprehensive insights into software projects through intelligent, multi-dimensional code analysis.
 
-## Features
+## 🚀 Features
 
-- Clone and analyse repositories from GitHub, GitLab, and Bitbucket
-- Support for direct Git URLs
-- Built-in analysers for file statistics and Git metadata
-- Extensible plugin system supporting CLI tools, Python scripts, and Go plugins
-- Task management with detailed logging
-- Storage and query capabilities for analysis results
+- 🔍 Multi-language repository analysis
+- 🧩 Extensible plugin system
+- 📊 Comprehensive metrics generation
+- 🤖 AI-powered code insights
+- 🚢 Supports GitHub, GitLab, and Bitbucket
+- 💻 CLI and extension-based analysis
 
 ## Installation
 
@@ -22,41 +22,12 @@ cd inspectre
 go build -o inspectre main.go
 
 # Make plugins executable
-chmod +x plugins/*.sh
-chmod +x plugins/*.py
+chmod +x plugins/*.sh plugins/*.py
 ```
 
-## Configuration
+## Quick Start
 
-Inspectre uses configuration files stored in the `configs` directory:
-
-- `repositories.json` - Repository configuration
-- `extensions.json` - Plugin configuration
-
-### Repository Configuration
-
-```json
-{
-  "version": 1,
-  "repositories": [
-    {
-      "name": "repo1",
-      "url": "https://github.com/user/repo1.git",
-      "type": "github",
-      "auth": {
-        "username": "your-github-username",
-        "token": "${GITHUB_TOKEN}"
-      }
-    }
-  ]
-}
-```
-
-Environment variables in the form `${VAR_NAME}` will be automatically replaced.
-
-## Usage
-
-### Analyzing a Repository
+### Analyse a Repository
 
 ```bash
 # Analyse a configured repository
@@ -65,148 +36,103 @@ Environment variables in the form `${VAR_NAME}` will be automatically replaced.
 # Analyse any Git repository by URL
 ./inspectre run https://github.com/username/repo.git
 
-# Specify output format
-./inspectre run repo1 --output json
+# Generate detailed insights
+./inspectre insights repo1
 ```
 
-### Managing Tasks
+## Configuration
 
-```bash
-# List running tasks
-./inspectre ps
+Inspectre uses configuration files stored in the `configs` directory:
 
-# Show all tasks (including completed)
-./inspectre ps --all
-
-# Show only failed tasks
-./inspectre ps --failed
-
-# View task logs
-./inspectre logs <task-id>
-
-# Follow task logs (similar to tail -f)
-./inspectre logs <task-id> --follow
-```
-
-### Managing Repositories
-
-```bash
-# List configured repositories
-./inspectre repos
-
-# Show repositories in JSON format
-./inspectre repos --json
-```
-
-### Managing Plugins
-
-```bash
-# List all plugins
-./inspectre plugin list
-
-# Filter plugins by type
-./inspectre plugin list --type cli
-./inspectre plugin list --type python
-./inspectre plugin list --type golang
-
-# Enable a plugin
-./inspectre plugin enable <plugin-name>
-
-# Disable a plugin
-./inspectre plugin disable <plugin-name>
-
-# View plugin details
-./inspectre plugin info <plugin-name>
-```
-
-### Querying Results
-
-```bash
-# Run a query on analysis results
-./inspectre query --sql "SELECT * FROM metrics LIMIT 10"
-
-# Output query results as JSON
-./inspectre query --sql "SELECT * FROM metrics WHERE name = 'commit_count'" --output json
-```
-
-## Extension System
-
-Inspectre supports three types of extensions:
-
-1. **CLI Tools** - Shell scripts or executables that analyse repositories
-2. **Python Scripts** - Python scripts for more complex analysis
-3. **Go Plugins** - Native Go extensions compiled as plugins
-
-### Extension Configuration
-
-Extensions are configured in `configs/extensions.json`:
+### Repository Configuration (`repositories.json`)
 
 ```json
 {
-  "version": 1,
-  "extensions": [
+  "repositories": [
     {
-      "name": "file_counter",
-      "type": "cli",
-      "path": "plugins/file_counter.sh",
-      "description": "Counts files by type",
-      "version": "1.0.0",
-      "author": "Inspectre Team",
-      "config": {
-        "exclude_dirs": ".git,node_modules,vendor"
-      },
-      "enabled": true
+      "name": "my-project",
+      "url": "https://github.com/user/repo1.git",
+      "type": "github",
+      "auth": {
+        "token": "${GITHUB_TOKEN}"
+      }
     }
   ]
 }
 ```
 
-### Creating Extensions
-
-Extensions receive the repository path as the first argument and can access configuration via environment variables prefixed with `INSPECTRE_CONFIG_`.
-
-Extensions should output metrics in JSON format:
+### Extension Configuration (`extensions.json`)
 
 ```json
-[
-  {
-    "name": "metric_name",
-    "value": 42,
-    "labels": {
-      "category": "example"
-    },
-    "timestamp": "2023-04-16T12:34:56Z"
-  }
-]
+{
+  "extensions": [
+    {
+      "name": "file_counter",
+      "type": "cli",
+      "path": "plugins/file-counter.sh",
+      "description": "Counts files by type",
+      "enabled": true,
+      "config": {
+        "exclude_dirs": ".git,node_modules,vendor"
+      }
+    }
+  ]
+}
 ```
 
-#### CLI Extensions
+## CLI Commands
 
-CLI extensions are simple executables or scripts that can be written in any language. They should:
+Here are some basic commands and operations, for indepth documentation, see [usage](./docs/usage.md).
 
-1. Accept a repository path as the first command-line argument
-2. Read configuration from environment variables prefixed with `INSPECTRE_CONFIG_`
-3. Output metrics in JSON format to stdout
-
-Example shell script:
-
+### Basic Analysis
 ```bash
-#!/bin/bash
-# Simple file counter
-REPO_PATH="$1"
-echo "["
-echo "  {"
-echo "    \"name\": \"file_count\","
-echo "    \"value\": $(find $REPO_PATH -type f | wc -l),"
-echo "    \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
-echo "  }"
-echo "]"
+# Run repository analysis
+inspectre run <repo-url>
+
+# Generate insights
+inspectre insights <repo-url>
+
+# List tasks
+inspectre ps
+
+# View task logs
+inspectre logs <task-id>
 ```
 
-#### Python Extensions
+### Plugin Management
+```bash
+# List plugins
+inspectre plugin list
 
-Python extensions offer more flexibility and can use Python libraries:
+# Enable a plugin
+inspectre plugin enable <plugin-name>
 
+# Disable a plugin
+inspectre plugin disable <plugin-name>
+```
+
+## Extension Types
+
+Inspectre supports three extension types:
+
+1. **CLI Tools**: Simple executable scripts
+    - Lightweight analysis
+    - Easy to create
+    - Minimal dependencies
+
+2. **Python Scripts**: Complex analysis with library support
+    - Full Python ecosystem
+    - Rich metric generation
+    - Advanced processing capabilities
+
+3. **Go Plugins**: Native performance plugins
+    - Compile-time type safety
+    - Direct Go interface
+    - Zero-overhead abstractions
+
+### Creating an Extension
+
+Example Python extension:
 ```python
 #!/usr/bin/env python3
 import os
@@ -215,129 +141,44 @@ import json
 from datetime import datetime
 
 repo_path = sys.argv[1]
-file_count = sum(1 for _ in os.popen(f"find {repo_path} -type f"))
-
 metrics = [{
     "name": "file_count",
-    "value": file_count,
+    "value": len(os.listdir(repo_path)),
     "timestamp": datetime.utcnow().isoformat() + "Z"
 }]
 
-print(json.dumps(metrics, indent=2))
-```
-
-#### Go Plugin Extensions
-
-Go plugins require building a shared object file:
-
-```go
-package main
-
-import (
-	"time"
-	"github.com/thushan/inspectre/internal/core/analysis"
-)
-
-// Analyser is exported for the plugin system
-var Analyser = &ExampleAnalyser{}
-
-type ExampleAnalyser struct{}
-
-func (a *ExampleAnalyser) Name() string {
-	return "example_analyser"
-}
-
-func (a *ExampleAnalyser) Initialize(repoPath string, env map[string]string) error {
-	return nil
-}
-
-func (a *ExampleAnalyser) Run() ([]analysis.Metric, error) {
-	return []analysis.Metric{
-		{
-			Name:      "example_metric",
-			Value:     42,
-			Timestamp: time.Now(),
-		},
-	}, nil
-}
-
-func (a *ExampleAnalyser) Cleanup() error {
-	return nil
-}
-```
-
-Build with:
-```bash
-go build -buildmode=plugin -o plugins/example.so example_plugin.go
+print(json.dumps(metrics))
 ```
 
 ## Architecture
 
-Inspectre is built with a modular architecture:
+Inspectre uses a sophisticated, event-driven architecture:
 
-- **Core Orchestration Layer** - Handles repository connections, Git operations, and task management
-- **Extension System** - Supports various extension types for analysis
-- **Storage Layer** - Stores and retrieves analysis results
+- Dynamic worker pool
+- Concurrent analysis
+- Extensible plugin framework
+- Advanced error handling
 
-### Directory Structure
+For a more detailed overview, see [Technical Overview](docs/technical.md)
 
-```
-.
-├── cmd
-│   └── inspectre         # CLI commands
-│       ├── core.go       # Core commands
-│       ├── extension.go  # Extension commands
-│       └── root.go       # Command registration
-├── configs               # Configuration files
-│   ├── extensions.json   # Extension configuration
-│   └── repositories.json # Repository configuration  
-├── internal              # Internal packages
-│   ├── core              # Core functionality
-│   │   ├── analysis      # Analysis framework
-│   │   ├── config        # Configuration management
-│   │   ├── repository    # Repository management
-│   │   └── task          # Task management
-│   ├── extensions        # Extension system
-│   │   ├── cli           # CLI extension support
-│   │   ├── golang        # Go plugin support
-│   │   └── python        # Python extension support
-│   └── storage           # Storage system
-├── plugins               # Extensions directory
-│   ├── file_counter.sh   # Example CLI extension
-│   └── complexity.py     # Example Python extension
-├── main.go               # Application entry point
-└── readme.md             # Documentation
-```
+## Performance & Scalability
 
-## Development
+- Adaptive worker pool
+- Concurrent analysis
+- Intelligent resource management
+- Configurable parallelism
 
-### Adding New Analysers
+## Roadmap
 
-To add a built-in analyser:
-
-1. Implement the `analysis.Analyser` interface
-2. Register it in the task manager
-
-### Adding New Extension Types
-
-To add a new extension type:
-
-1. Create a new package in `internal/extensions/`
-2. Implement the extension loading and execution logic
-3. Register the extension type in the extension manager
-
-## Future Roadmap
-
-- Implement DuckDB integration for better metrics storage and querying
-- Add support for remote extension repositories
-- Create a web UI for visualization and interaction
-- Add performance analysis capabilities
-- Implement security scanning extensions
-- Support for analyzing multiple repositories with comparison capabilities
+- Enhanced LLM integration
+- More analysis techniques
+- Advanced security scanning
+- Distributed analysis support
+- Machine learning insights
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests.
+Contributions are welcome!
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
@@ -345,6 +186,14 @@ Contributions are welcome! Please feel free to submit pull requests.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Support
+
+For issues and feature requests, please use GitHub Issues.
+
 ## License
 
 MIT License
+
+## Authors
+
+Developed by Thushan Fernando and contributors.
