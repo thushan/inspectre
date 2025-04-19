@@ -1,6 +1,7 @@
 package analyser
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,9 @@ const (
 
 	// Batch size for file operations
 	FileBatchSize = 100
+
+	// Timeout for file operations
+	FileOpTimeout = 30 * time.Second
 )
 
 // DefaultExcludeDirs contains default directories to exclude from analyser
@@ -55,14 +59,21 @@ type FileAnalyser struct {
 	largestSize  int64
 	extensionMap map[string]int
 	resultsMu    sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // NewFileAnalyser creates a new file analyser
 func NewFileAnalyser() *FileAnalyser {
+	// Create a default context that can be cancelled during cleanup
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &FileAnalyser{
 		excludeDirs:  DefaultExcludeDirs,
 		fileStats:    make(map[string]int),
 		extensionMap: make(map[string]int),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -85,6 +96,10 @@ func (a *FileAnalyser) Initialize(repoPath string, env map[string]string) error 
 
 // Run performs the analyser with parallelization
 func (a *FileAnalyser) Run() ([]Metric, error) {
+	// Create a context with timeout for the entire operation
+	runCtx, cancel := context.WithTimeout(a.ctx, FileOpTimeout)
+	defer cancel()
+
 	// Create channels for worker pool
 	filesChan := make(chan FileInfo, FileChannelSize)
 	resultsChan := make(chan error, FileWorkerCount)
@@ -97,22 +112,54 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			a.processFiles(filesChan)
+			defer func() {
+				if r := recover(); r != nil {
+					resultsChan <- fmt.Errorf("panic in file processor: %v", r)
+				}
+			}()
+			a.processFiles(runCtx, filesChan)
 		}()
 	}
 
 	// Start producer
+	producerDone := make(chan struct{})
 	go func() {
+		defer close(producerDone)
 		defer close(filesChan)
-		err := a.walkRepository(filesChan)
+		defer func() {
+			if r := recover(); r != nil {
+				resultsChan <- fmt.Errorf("panic in file walker: %v", r)
+			}
+		}()
+
+		err := a.walkRepository(runCtx, filesChan)
 		if err != nil {
 			resultsChan <- fmt.Errorf("failed to walk repository: %w", err)
 		}
 	}()
 
-	// Wait for workers to finish
-	wg.Wait()
-	close(resultsChan)
+	// Wait for producer to finish with timeout
+	select {
+	case <-producerDone:
+		// Producer finished successfully
+	case <-runCtx.Done():
+		return nil, fmt.Errorf("file analysis timed out during directory walk: %w", runCtx.Err())
+	}
+
+	// Wait for workers to finish with timeout
+	workersDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(workersDone)
+		close(resultsChan)
+	}()
+
+	select {
+	case <-workersDone:
+		// Workers finished successfully
+	case <-runCtx.Done():
+		return nil, fmt.Errorf("file analysis timed out during processing: %w", runCtx.Err())
+	}
 
 	// Check for errors
 	for err := range resultsChan {
@@ -126,8 +173,16 @@ func (a *FileAnalyser) Run() ([]Metric, error) {
 }
 
 // walkRepository traverses the repository and sends file info to the channel
-func (a *FileAnalyser) walkRepository(filesChan chan<- FileInfo) error {
+func (a *FileAnalyser) walkRepository(ctx context.Context, filesChan chan<- FileInfo) error {
 	return filepath.Walk(a.repoPath, func(path string, info os.FileInfo, err error) error {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Continue processing
+		}
+
 		if err != nil {
 			return err
 		}
@@ -154,12 +209,17 @@ func (a *FileAnalyser) walkRepository(filesChan chan<- FileInfo) error {
 			ext = "(none)"
 		}
 
-		// Send file info to channel
-		filesChan <- FileInfo{
+		// Send file info to channel with context awareness
+		select {
+		case filesChan <- FileInfo{
 			Path:      path,
 			Size:      info.Size(),
 			Extension: ext,
 			IsDir:     false,
+		}:
+			// Successfully sent
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 
 		return nil
@@ -167,23 +227,35 @@ func (a *FileAnalyser) walkRepository(filesChan chan<- FileInfo) error {
 }
 
 // processFiles consumes file info from the channel and updates statistics
-func (a *FileAnalyser) processFiles(filesChan <-chan FileInfo) {
+func (a *FileAnalyser) processFiles(ctx context.Context, filesChan <-chan FileInfo) {
 	// Process files in batches for better performance
 	batch := make([]FileInfo, 0, FileBatchSize)
 
-	for fileInfo := range filesChan {
-		batch = append(batch, fileInfo)
+	for {
+		select {
+		case <-ctx.Done():
+			// Context cancelled, process any remaining files and exit
+			if len(batch) > 0 {
+				a.processBatch(batch)
+			}
+			return
+		case fileInfo, ok := <-filesChan:
+			if !ok {
+				// Channel closed, process any remaining files and exit
+				if len(batch) > 0 {
+					a.processBatch(batch)
+				}
+				return
+			}
 
-		// Process batch when it's full
-		if len(batch) >= FileBatchSize {
-			a.processBatch(batch)
-			batch = batch[:0] // Clear batch but keep capacity
+			batch = append(batch, fileInfo)
+
+			// Process batch when it's full
+			if len(batch) >= FileBatchSize {
+				a.processBatch(batch)
+				batch = batch[:0] // Clear batch but keep capacity
+			}
 		}
-	}
-
-	// Process remaining files
-	if len(batch) > 0 {
-		a.processBatch(batch)
 	}
 }
 
@@ -271,8 +343,12 @@ func (a *FileAnalyser) buildMetrics() []Metric {
 
 // Cleanup performs any necessary cleanup
 func (a *FileAnalyser) Cleanup() error {
+	// Cancel context to stop any running operations
+	a.cancel()
+
 	// Clear maps to help garbage collection
 	a.fileStats = nil
 	a.extensionMap = nil
+
 	return nil
 }

@@ -75,7 +75,11 @@ func (d *Display) Close() {
 	d.closed = true
 	d.closedMu.Unlock()
 
-	// Cancel context
+	// Get logger
+	logger := logging.GetLogger()
+	logger.Debug("Closing display manager")
+
+	// Cancel context to signal shutdown to event handler
 	d.cancel()
 
 	// Stop any active spinner
@@ -94,24 +98,26 @@ func (d *Display) Close() {
 	}
 	d.progressMu.Unlock()
 
-	// Close event channel
-	close(d.eventChan)
-
-	// Wait for event handler to finish with timeout
-	done := make(chan struct{})
+	// Wait for event handler to finish processing or timeout
+	waitDone := make(chan struct{})
 	go func() {
 		d.wg.Wait()
-		close(done)
+		close(waitDone)
 	}()
 
 	select {
-	case <-done:
+	case <-waitDone:
 		// Handler exited cleanly
+		logger.Debug("Display event handler exited cleanly")
 	case <-time.After(ShutdownTimeout):
 		// Timeout - log warning
-		logger := logging.GetLogger()
 		logger.Warning("Display manager shutdown timed out waiting for event handler")
 	}
+
+	// Close event channel after event handler exits or times out
+	// This prevents sends to a closed channel if the handler is still running
+	close(d.eventChan)
+	logger.Debug("Display manager closed")
 }
 
 // StartSpinner starts a spinner

@@ -132,7 +132,7 @@ func (l *Logger) RegisterTaskLog(taskID, logPath string) error {
 	}
 	l.mu.RUnlock()
 
-	// Close any existing writer
+	// Close any existing writer for this task to prevent leaks
 	if w, exists := l.taskWriters[taskID]; exists {
 		if closer, ok := w.(io.Closer); ok {
 			_ = closer.Close()
@@ -162,7 +162,9 @@ func (l *Logger) CloseTaskLog(taskID string) {
 
 	if w, exists := l.taskWriters[taskID]; exists {
 		if closer, ok := w.(io.Closer); ok {
-			_ = closer.Close()
+			if err := closer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing log file for task %s: %v\n", taskID, err)
+			}
 		}
 		delete(l.taskWriters, taskID)
 	}
@@ -211,6 +213,75 @@ func (l *Logger) writeLogMessage(level LogLevel, taskID, format string, args ...
 		_, _ = fmt.Fprintln(w, formatted)
 	}
 	l.mu.RUnlock()
+}
+
+// Flush writes all pending log messages
+func (l *Logger) Flush() {
+	// Attempt to flush any writers that support it
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	// Try to flush the default writer
+	if flusher, ok := l.defaultWriter.(interface{ Flush() error }); ok {
+		_ = flusher.Flush()
+	}
+
+	// Try to flush all registered writers
+	for _, w := range l.writers {
+		if flusher, ok := w.(interface{ Flush() error }); ok {
+			_ = flusher.Flush()
+		}
+	}
+
+	// Try to flush all task writers
+	l.taskMu.RLock()
+	defer l.taskMu.RUnlock()
+	for _, w := range l.taskWriters {
+		if flusher, ok := w.(interface{ Flush() error }); ok {
+			_ = flusher.Flush()
+		}
+	}
+}
+
+// Close shuts down the logger
+func (l *Logger) Close() {
+	l.mu.Lock()
+
+	// Skip if already closed
+	if l.closed {
+		l.mu.Unlock()
+		return
+	}
+
+	// Mark as closed first to prevent new writes
+	l.closed = true
+
+	// Close all writers
+	for name, w := range l.writers {
+		if closer, ok := w.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing log writer %s: %v\n", name, err)
+			}
+		}
+	}
+
+	// Clear the writers map to help with GC
+	l.writers = make(map[string]io.Writer)
+	l.mu.Unlock()
+
+	// Close all task writers
+	l.taskMu.Lock()
+	for taskID, w := range l.taskWriters {
+		if closer, ok := w.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing task log for %s: %v\n", taskID, err)
+			}
+		}
+	}
+
+	// Clear the task writers map
+	l.taskWriters = make(map[string]io.Writer)
+	l.taskMu.Unlock()
 }
 
 // formatLogMessage formats a log message according to the configured format
@@ -315,42 +386,4 @@ func (l *Logger) TaskWarning(taskID, format string, args ...interface{}) {
 // TaskError logs error messages for a task
 func (l *Logger) TaskError(taskID, format string, args ...interface{}) {
 	l.writeLogMessage(LevelError, taskID, format, args...)
-}
-
-// Flush writes all pending log messages
-func (l *Logger) Flush() {
-	// Direct writing approach doesn't need flushing
-	// This is just a compatibility method
-}
-
-// Close shuts down the logger
-func (l *Logger) Close() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	// Mark as closed first to prevent new writes
-	l.closed = true
-
-	// Close all writers
-	for _, w := range l.writers {
-		if closer, ok := w.(io.Closer); ok {
-			_ = closer.Close()
-		}
-	}
-
-	// Clear the writers map
-	l.writers = make(map[string]io.Writer)
-
-	// Close all task writers
-	l.taskMu.Lock()
-	defer l.taskMu.Unlock()
-
-	for _, w := range l.taskWriters {
-		if closer, ok := w.(io.Closer); ok {
-			_ = closer.Close()
-		}
-	}
-
-	// Clear the task writers map
-	l.taskWriters = make(map[string]io.Writer)
 }

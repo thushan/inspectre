@@ -15,15 +15,14 @@ func (m *Manager) startWorkers() {
 
 	// Start initial set of workers
 	for i := 0; i < m.minWorkerCount; i++ {
-		m.startWorker()
+		m.startWorkerLocked(i)
 	}
 
 	m.logger.Info("Worker pool started successfully with %d workers", m.currentWorkers)
 }
 
-// startWorker launches a new worker goroutine
-func (m *Manager) startWorker() {
-	workerID := m.currentWorkers
+// startWorkerLocked launches a new worker goroutine while holding the lock
+func (m *Manager) startWorkerLocked(workerID int) {
 	workerCtx, workerCancel := context.WithCancel(m.ctx)
 
 	m.logger.Debug("Creating worker %d", workerID)
@@ -41,6 +40,13 @@ func (m *Manager) startWorker() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer func() {
+			// Recover from panics to prevent goroutine leaks
+			if r := recover(); r != nil {
+				m.logger.Error("Worker %d panic: %v", workerID, r)
+			}
+		}()
+
 		m.logger.Debug("Worker %d goroutine started", workerID)
 		m.workerLoop(workerCtx, workerID)
 
@@ -54,6 +60,31 @@ func (m *Manager) startWorker() {
 	}()
 
 	m.logger.Debug("Worker %d created and started", workerID)
+}
+
+// startWorker launches a new worker goroutine
+func (m *Manager) startWorker() {
+	m.workersMu.Lock()
+	workerID := m.currentWorkers
+	m.startWorkerLocked(workerID)
+	m.workersMu.Unlock()
+}
+
+// stopWorker terminates a worker
+func (m *Manager) stopWorker(workerID int) error {
+	m.workersMu.Lock()
+	worker, exists := m.workerStates[workerID]
+	if !exists {
+		m.workersMu.Unlock()
+		return fmt.Errorf("worker %d not found", workerID)
+	}
+
+	// Signal worker to cancel
+	worker.Cancel()
+	m.workersMu.Unlock()
+
+	m.logger.Debug("Sent cancellation signal to worker %d", workerID)
+	return nil
 }
 
 // workerLoop is the main execution loop for a worker
@@ -107,10 +138,16 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 				Message:   fmt.Sprintf("Processing repository %s", task.Repository),
 			})
 
+			// Create a task-specific context with timeout
+			_, taskCancel := context.WithTimeout(ctx, TaskExecutionTimeout)
+
 			// Execute the task
 			m.logger.Debug("Worker %d executing task %s", workerID, task.ID)
 			result := m.executeTask(task)
 			m.logger.Debug("Worker %d completed execution of task %s", workerID, task.ID)
+
+			// Always cancel the task context
+			taskCancel()
 
 			// Update worker state
 			m.workersMu.Lock()
@@ -120,7 +157,7 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 			}
 			m.workersMu.Unlock()
 
-			// Send result for processing
+			// Send result for processing with timeout to prevent deadlocks
 			m.logger.Debug("Worker %d sending results for task %s", workerID, task.ID)
 			select {
 			case m.taskResults <- result:
@@ -129,6 +166,10 @@ func (m *Manager) workerLoop(ctx context.Context, workerID int) {
 				// Context cancelled, exit worker
 				m.logger.Warning("Worker %d exiting during result send: context cancelled", workerID)
 				return
+			case <-time.After(5 * time.Second):
+				// Couldn't send results after timeout, log and continue
+				m.logger.Warning("Worker %d: timeout sending results for task %s, dropping results",
+					workerID, task.ID)
 			}
 		}
 	}
@@ -139,13 +180,21 @@ func (m *Manager) startWorkerScaling() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Error("Panic in worker scaling goroutine: %v", r)
+			}
+		}()
 
 		ticker := time.NewTicker(WorkerScaleInterval)
 		defer ticker.Stop()
 
+		m.logger.Info("Worker scaling goroutine started")
+
 		for {
 			select {
 			case <-m.ctx.Done():
+				m.logger.Info("Worker scaling goroutine shutting down: context cancelled")
 				return
 			case <-ticker.C:
 				m.scaleWorkers()
@@ -156,16 +205,21 @@ func (m *Manager) startWorkerScaling() {
 
 // scaleWorkers adjusts the number of workers based on load
 func (m *Manager) scaleWorkers() {
-	m.workersMu.Lock()
-	defer m.workersMu.Unlock()
+	// First gather data about workers under a read lock
+	m.workersMu.RLock()
+
+	// Skip if shutting down
+	if m.closed {
+		m.workersMu.RUnlock()
+		return
+	}
 
 	// Count idle workers and identify idle ones to potentially terminate
 	idleCount := 0
 	busyCount := 0
+	idleTooLong := make([]int, 0)
 
 	now := time.Now()
-	var idleTooLong []int
-
 	for id, state := range m.workerStates {
 		if state.IsIdle {
 			idleCount++
@@ -181,18 +235,30 @@ func (m *Manager) scaleWorkers() {
 	}
 
 	// Check if we need to scale up (all workers are busy)
-	if idleCount == 0 && m.currentWorkers < m.maxWorkerCount {
+	scaleUp := idleCount == 0 && m.currentWorkers < m.maxWorkerCount
+
+	// Release the read lock
+	m.workersMu.RUnlock()
+
+	// Scale up if needed
+	if scaleUp {
 		m.logger.Debug("Scaling up workers: %d -> %d", m.currentWorkers, m.currentWorkers+1)
-		m.workersMu.Unlock()
 		m.startWorker()
-		m.workersMu.Lock()
 	}
 
 	// Scale down by terminating idle workers if we have too many
 	for _, id := range idleTooLong {
-		if worker, exists := m.workerStates[id]; exists && m.currentWorkers > m.minWorkerCount {
+		// Double-check with lock that worker still exists and we're still above min
+		m.workersMu.Lock()
+		shouldStop := false
+		if _, exists := m.workerStates[id]; exists && m.currentWorkers > m.minWorkerCount {
+			shouldStop = true
+		}
+		m.workersMu.Unlock()
+
+		if shouldStop {
 			m.logger.Debug("Scaling down: terminating idle worker %d", id)
-			worker.Cancel()
+			m.stopWorker(id)
 		}
 	}
 }

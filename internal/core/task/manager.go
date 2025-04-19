@@ -4,18 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"runtime"
-	"sync"
-	"time"
-
-	"github.com/thushan/inspectre/internal/core/analyser"
 	appctx "github.com/thushan/inspectre/internal/core/context"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/repository"
-	"github.com/thushan/inspectre/internal/core/types"
 	"github.com/thushan/inspectre/internal/extensions"
 	"github.com/thushan/inspectre/internal/storage"
+	"io"
+	"runtime"
+	"time"
+
+	"github.com/thushan/inspectre/internal/core/types"
 )
 
 // Task status constants
@@ -37,6 +35,7 @@ const (
 	UIEventSize    = 100
 
 	// Timeouts
+	ShutdownTimeout      = 10 * time.Second
 	TaskExecutionTimeout = 30 * time.Minute
 	CloneTimeout         = 10 * time.Minute
 
@@ -52,63 +51,6 @@ var (
 	ErrTaskCancelled      = errors.New("task was cancelled")
 	ErrManagerClosed      = errors.New("task manager is closed")
 )
-
-// UIEvent represents an event related to task execution that needs UI attention
-type UIEvent struct {
-	TaskID    string
-	EventType string
-	Message   string
-	Data      interface{}
-}
-
-// TaskResult contains the output of a task run
-type TaskResult struct {
-	TaskID      string
-	Repository  string
-	Results     []*analyser.Result
-	Error       error
-	CompletedAt time.Time
-}
-
-// WorkerState tracks the state of a worker
-type WorkerState struct {
-	ID        int
-	IsIdle    bool
-	LastUsed  time.Time
-	TaskCount int
-	Cancel    context.CancelFunc
-}
-
-// Manager handles analyser tasks
-type Manager struct {
-	repoManager      *repository.Manager
-	storageManager   *storage.Manager
-	extensionManager *extensions.Manager
-	tasks            map[string]*types.Task
-	tasksMu          sync.RWMutex
-	ctx              context.Context
-	cancelFunc       context.CancelFunc
-	logger           *logging.Logger
-	display          types.DisplayProvider
-
-	// Worker pool related fields
-	taskQueue    chan *types.Task
-	taskResults  chan TaskResult
-	uiEvents     chan UIEvent
-	workerStates map[int]*WorkerState
-	workersMu    sync.RWMutex
-
-	// Shutdown coordination
-	shutdownOnce sync.Once
-	wg           sync.WaitGroup
-
-	// Configuration
-	minWorkerCount int
-	maxWorkerCount int
-	currentWorkers int
-	closed         bool
-	closedMu       sync.RWMutex
-}
 
 // NewManager creates a new task manager
 func NewManager(repoManager *repository.Manager, storageManager *storage.Manager, extensionManager *extensions.Manager, appCtx *appctx.AppContext) *Manager {
@@ -353,29 +295,29 @@ func (m *Manager) CleanupTask(taskID string) error {
 
 // Shutdown performs a graceful shutdown
 func (m *Manager) Shutdown(ctx context.Context) error {
-	// Only shut down once
-	var alreadyClosed bool
+	var err error
+
 	m.shutdownOnce.Do(func() {
 		m.logger.Info("Shutting down task manager...")
 
-		// Mark as closed to prevent new tasks
+		// Mark as closed first to prevent new operations
 		m.closedMu.Lock()
 		m.closed = true
 		m.closedMu.Unlock()
 
-		// Cancel all workers
+		// Create a child context with timeout if parent doesn't have one
+		shutdownCtx, cancel := context.WithTimeout(ctx, ShutdownTimeout)
+		defer cancel()
+
+		// Cancel all workers first
 		m.workersMu.Lock()
 		for _, worker := range m.workerStates {
 			worker.Cancel()
 		}
 		m.workersMu.Unlock()
+		m.logger.Info("All workers cancelled")
 
-		// Cancel main context after a short delay to allow for cleanup
-		time.AfterFunc(100*time.Millisecond, func() {
-			m.cancelFunc()
-		})
-
-		// Cancel any running tasks
+		// Update status of any running tasks
 		m.tasksMu.Lock()
 		for id, task := range m.tasks {
 			if task.Status == StatusRunning || task.Status == StatusQueued {
@@ -385,46 +327,51 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			}
 		}
 		m.tasksMu.Unlock()
+		m.logger.Info("All running tasks marked as cancelled")
 
-		// Close channels in the correct order
-		// First stop accepting new tasks
+		// Close channels in the correct order to avoid deadlocks
+		// 1. Close task queue first to stop new tasks from being processed
 		close(m.taskQueue)
+		m.logger.Info("Task queue closed")
 
-		// Give time for any pending results to be processed
-		time.AfterFunc(200*time.Millisecond, func() {
-			close(m.taskResults)
-			close(m.uiEvents)
-		})
+		// 2. Wait briefly to allow workers to process final messages
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-shutdownCtx.Done():
+			err = fmt.Errorf("shutdown timed out while waiting for workers: %w", shutdownCtx.Err())
+			m.logger.Warning("Shutdown timeout while waiting for workers")
+		}
+
+		// 3. Close result and event channels
+		close(m.taskResults)
+		close(m.uiEvents)
+		m.logger.Info("All channels closed")
+
+		// 4. Finally, cancel the main context
+		m.cancelFunc()
+		m.logger.Info("Main context cancelled")
+
+		// Wait for all goroutines to complete with timeout
+		waitCh := make(chan struct{})
+		go func() {
+			m.wg.Wait()
+			close(waitCh)
+		}()
+
+		select {
+		case <-waitCh:
+			m.logger.Info("All goroutines successfully terminated")
+		case <-shutdownCtx.Done():
+			err = fmt.Errorf("shutdown timed out waiting for goroutines: %w", shutdownCtx.Err())
+			m.logger.Warning("Timeout waiting for goroutines to terminate, some resources may leak")
+		}
+
+		// Close task logs
+		for id := range m.tasks {
+			m.logger.CloseTaskLog(id)
+		}
+		m.logger.Info("All task logs closed")
 	})
 
-	if alreadyClosed {
-		return nil
-	}
-
-	// Wait for context timeout or all goroutines to finish
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(50 * time.Millisecond):
-		// Give a little time for everything to process
-	}
-
-	// Wait for all workers to complete with timeout
-	waitCh := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(waitCh)
-	}()
-
-	select {
-	case <-waitCh:
-		// All workers completed
-		m.logger.Info("Task manager shutdown completed")
-	case <-ctx.Done():
-		// Timeout or cancellation
-		m.logger.Warning("Task manager shutdown timed out or was cancelled")
-		return ctx.Err()
-	}
-
-	return nil
+	return err
 }

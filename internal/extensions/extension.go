@@ -1,7 +1,9 @@
 package extensions
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"plugin"
@@ -25,9 +27,14 @@ var (
 	ErrUnsupportedExtension = errors.New("unsupported extension type")
 	ErrExtensionNotFound    = errors.New("extension not found")
 	ErrInvalidExtension     = errors.New("invalid extension")
+	ErrLoadTimeout          = errors.New("extension load timeout")
+	ErrContextCancelled     = errors.New("operation cancelled")
 
 	// Extension cache TTL in seconds
 	ExtensionCacheTTL = int64(300) // 5 minutes
+
+	// Timeouts
+	ExtensionLoadTimeout = 30 * time.Second
 )
 
 // Type represents the extension type
@@ -64,6 +71,9 @@ type Manager struct {
 	analyserCache map[string]*CachedAnalyser
 	mu            sync.RWMutex
 	cacheMu       sync.RWMutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 // CLIAnalyserFactory creates CLI analysers
@@ -115,11 +125,16 @@ func (f *GolangAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error
 
 // NewManager creates a new extension manager
 func NewManager(extensionsDir string) *Manager {
+	// Create context for extension operations
+	ctx, cancel := context.WithCancel(context.Background())
+
 	manager := &Manager{
 		extensionsDir: extensionsDir,
 		extensions:    make(map[string]*Extension),
 		factories:     make(map[Type]AnalyserFactory),
 		analyserCache: make(map[string]*CachedAnalyser),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 
 	// Register factories for different extension types
@@ -130,16 +145,45 @@ func NewManager(extensionsDir string) *Manager {
 	return manager
 }
 
+// Shutdown performs cleanup operations for the extension manager
+func (m *Manager) Shutdown() error {
+	// Signal cancellation to all operations
+	m.cancel()
+
+	// Wait for operations to complete with timeout
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All operations completed
+	case <-time.After(5 * time.Second):
+		return errors.New("timeout waiting for extension operations to complete")
+	}
+
+	// Clear cache
+	m.cacheMu.Lock()
+	m.analyserCache = nil
+	m.cacheMu.Unlock()
+
+	return nil
+}
+
 // LoadExtension loads an extension by name
 func (m *Manager) LoadExtension(name string) (analyser.Analyser, error) {
-	// Check cache first
+	// Create timeout context for the operation
+	ctx, cancel := context.WithTimeout(m.ctx, ExtensionLoadTimeout)
+	defer cancel()
+
+	// Check cache first under read lock
 	m.cacheMu.RLock()
-	if cached, ok := m.analyserCache[name]; ok {
-		if isCacheValid(cached.CreatedAt) {
-			analyser := cached.Analyser
-			m.cacheMu.RUnlock()
-			return analyser, nil
-		}
+	if cached, ok := m.analyserCache[name]; ok && isCacheValid(cached.CreatedAt) {
+		analyser := cached.Analyser
+		m.cacheMu.RUnlock()
+		return analyser, nil
 	}
 	m.cacheMu.RUnlock()
 
@@ -162,8 +206,23 @@ func (m *Manager) LoadExtension(name string) (analyser.Analyser, error) {
 		return nil, ErrUnsupportedExtension
 	}
 
-	// Create analyser
-	analyser, err := factory.Create(ext)
+	// Create analyser with timeout
+	var analyser analyser.Analyser
+	var err error
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		analyser, err = factory.Create(ext)
+	}()
+
+	select {
+	case <-done:
+		// Creation completed
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %v", ErrLoadTimeout, ctx.Err())
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -181,12 +240,17 @@ func (m *Manager) LoadExtension(name string) (analyser.Analyser, error) {
 
 // LoadAllEnabled loads all enabled extensions
 func (m *Manager) LoadAllEnabled() ([]analyser.Analyser, error) {
+	// Create context for the entire operation
+	ctx, cancel := context.WithTimeout(m.ctx, ExtensionLoadTimeout*2)
+	defer cancel()
+
 	var analysers []analyser.Analyser
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	var loadErrors []error
 
-	// First, gather all enabled extensions
+	// Use a mutex to protect the results slice during concurrent access
+	var resultMu sync.Mutex
+
+	// First gather all enabled extensions under a read lock
 	m.mu.RLock()
 	enabledExtensions := make([]*Extension, 0)
 	for _, ext := range m.extensions {
@@ -196,30 +260,120 @@ func (m *Manager) LoadAllEnabled() ([]analyser.Analyser, error) {
 	}
 	m.mu.RUnlock()
 
-	// Load extensions in parallel
-	for _, ext := range enabledExtensions {
-		wg.Add(1)
-		go func(ext *Extension) {
-			defer wg.Done()
-
-			analyser, err := m.LoadExtension(ext.Name)
-			if err != nil {
-				mu.Lock()
-				loadErrors = append(loadErrors, err)
-				mu.Unlock()
-				return
-			}
-
-			mu.Lock()
-			analysers = append(analysers, analyser)
-			mu.Unlock()
-		}(ext)
+	if len(enabledExtensions) == 0 {
+		return []analyser.Analyser{}, nil
 	}
 
-	wg.Wait()
+	// Create a channel for results with buffer equal to number of extensions
+	type loadResult struct {
+		analyser analyser.Analyser
+		err      error
+		name     string
+	}
+	resultCh := make(chan loadResult, len(enabledExtensions))
 
-	// Return what we have even if there were errors
-	return analysers, nil
+	// Load extensions in parallel with proper resource tracking
+	for _, ext := range enabledExtensions {
+		ext := ext // Capture for goroutine
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+
+			// Create a separate context for each extension load
+			extCtx, extCancel := context.WithTimeout(ctx, ExtensionLoadTimeout)
+			defer extCancel()
+
+			// Track the time taken for metrics
+			startTime := time.Now()
+
+			// Load the extension with the context
+			a, err := m.loadExtensionWithContext(extCtx, ext.Name)
+
+			// Send result through channel with context awareness
+			select {
+			case resultCh <- loadResult{
+				analyser: a,
+				err:      err,
+				name:     ext.Name,
+			}:
+				// Result sent
+			case <-ctx.Done():
+				// Parent context cancelled, discard result
+			}
+
+			loadTime := time.Since(startTime)
+			if loadTime > 1*time.Second {
+				// Log slow extension loads
+				fmt.Printf("Warning: Extension %s took %v to load\n", ext.Name, loadTime)
+			}
+		}()
+	}
+
+	// Collect results with timeout
+	for i := 0; i < len(enabledExtensions); i++ {
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				loadErrors = append(loadErrors, fmt.Errorf("failed to load %s: %w", result.name, result.err))
+			} else {
+				resultMu.Lock()
+				analysers = append(analysers, result.analyser)
+				resultMu.Unlock()
+			}
+		case <-ctx.Done():
+			// Overall timeout or cancellation
+			return analysers, fmt.Errorf("%w: %v", ErrContextCancelled, ctx.Err())
+		}
+	}
+
+	// Return what we have even if some failed
+	var err error
+	if len(loadErrors) > 0 {
+		// Combine errors for reporting
+		errMsg := fmt.Sprintf("failed to load %d extensions", len(loadErrors))
+		if len(loadErrors) > 0 {
+			errMsg += fmt.Sprintf(": %v", loadErrors[0])
+		}
+		err = errors.New(errMsg)
+	}
+
+	return analysers, err
+}
+
+// loadExtensionWithContext is a helper that respects context cancellation
+func (m *Manager) loadExtensionWithContext(ctx context.Context, name string) (analyser.Analyser, error) {
+	// Check if the context is already cancelled
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		// Continue with loading
+	}
+
+	// Run load with cancellation support
+	resultCh := make(chan struct {
+		a   analyser.Analyser
+		err error
+	}, 1)
+
+	go func() {
+		a, err := m.LoadExtension(name)
+		select {
+		case resultCh <- struct {
+			a   analyser.Analyser
+			err error
+		}{a, err}:
+		case <-ctx.Done():
+			// Context cancelled, discard result
+		}
+	}()
+
+	select {
+	case result := <-resultCh:
+		return result.a, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // RegisterExtension adds or updates an extension in the registry

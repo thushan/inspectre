@@ -144,29 +144,31 @@ func (m *Manager) shutdown(ctx context.Context) error {
 		// Cancel context to signal shutdown to ongoing operations
 		m.cancelFunc()
 
-		// Create a timer for timeout
-		timer := time.NewTimer(1 * time.Second)
-		defer timer.Stop()
+		// Set up a timeout for cleanup operations
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cleanupCancel()
 
 		// Wait for all goroutines to complete or timeout
-		done := make(chan struct{})
+		waitCh := make(chan struct{})
 		go func() {
 			m.wg.Wait()
-			close(done)
+			close(waitCh)
 		}()
 
 		select {
-		case <-done:
+		case <-waitCh:
 			// All goroutines exited cleanly
-			m.logger.Info("Repository manager shutdown completed")
-		case <-timer.C:
+			m.logger.Info("Repository manager shutdown completed successfully")
+		case <-cleanupCtx.Done():
 			// Timeout - some goroutines didn't exit
+			err = fmt.Errorf("repository manager shutdown timed out: %w", cleanupCtx.Err())
 			m.logger.Warning("Repository manager shutdown timed out, some operations may not have completed")
-		case <-ctx.Done():
-			// Context deadline exceeded
-			err = ctx.Err()
-			m.logger.Warning("Repository manager shutdown interrupted: %v", err)
 		}
+
+		// Clear caches to help with garbage collection
+		m.repoCacheMu.Lock()
+		m.repoCache = nil
+		m.repoCacheMu.Unlock()
 	})
 
 	return err
@@ -198,9 +200,26 @@ func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
 		}
 	}
 
-	// Generate task ID
-	rawId, err := SonyFlake.NextID()
-	taskID := strconv.FormatUint(rawId, 36)
+	// Generate task ID with retry mechanism
+	var rawId uint64
+	var taskID string
+
+	// Retry a few times if ID generation fails
+	for attempts := 0; attempts < 3; attempts++ {
+		var err error
+		rawId, err = SonyFlake.NextID()
+		if err == nil {
+			taskID = strconv.FormatUint(rawId, 36)
+			break
+		}
+
+		if attempts == 2 {
+			return nil, fmt.Errorf("failed to generate task ID: %w", err)
+		}
+
+		// Brief delay before retry
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Create base task directory
 	baseDir := filepath.Join(m.tempDir, taskID)

@@ -12,12 +12,16 @@ func (m *Manager) startEventHandlers() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		m.logger.Info("Task result processor started")
+
 		for {
 			select {
 			case <-m.ctx.Done():
+				m.logger.Info("Task result processor shutting down: context cancelled")
 				return
 			case result, ok := <-m.taskResults:
 				if !ok {
+					m.logger.Info("Task result processor shutting down: channel closed")
 					return
 				}
 				m.processTaskResult(result)
@@ -29,12 +33,16 @@ func (m *Manager) startEventHandlers() {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		m.logger.Info("UI event processor started")
+
 		for {
 			select {
 			case <-m.ctx.Done():
+				m.logger.Info("UI event processor shutting down: context cancelled")
 				return
 			case event, ok := <-m.uiEvents:
 				if !ok {
+					m.logger.Info("UI event processor shutting down: channel closed")
 					return
 				}
 				m.handleUIEvent(event)
@@ -131,7 +139,7 @@ func (m *Manager) handleUIEvent(event UIEvent) {
 	}
 }
 
-// sendUIEvent sends an event to the UI event channel
+// sendUIEvent sends an event to the UI event channel (non-blocking)
 func (m *Manager) sendUIEvent(event UIEvent) {
 	select {
 	case m.uiEvents <- event:

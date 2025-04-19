@@ -15,7 +15,16 @@ func (d *Display) startEventHandler() {
 
 	d.wg.Add(1)
 	go func() {
+		// Ensure the waitgroup is decremented on exit
 		defer d.wg.Done()
+
+		// Handle panics to prevent goroutine leaks
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Recovered from panic in UI event handler: %v", r)
+			}
+		}()
+
 		logger.Info("UI event handler goroutine started")
 
 		for {
@@ -23,6 +32,28 @@ func (d *Display) startEventHandler() {
 			case <-d.ctx.Done():
 				// Context cancelled, exit
 				logger.Info("UI event handler stopping: context cancelled")
+
+				// Process any remaining events before exiting
+				// This prevents events getting dropped during shutdown
+				drainTimeout := time.After(100 * time.Millisecond)
+				drainCount := 0
+
+			drainLoop:
+				for {
+					select {
+					case event, ok := <-d.eventChan:
+						if !ok {
+							break drainLoop
+						}
+						d.handleEvent(event)
+						drainCount++
+					case <-drainTimeout:
+						logger.Debug("Event handler drain timeout after processing %d events", drainCount)
+						break drainLoop
+					}
+				}
+
+				logger.Info("UI event handler successfully drained %d events before exit", drainCount)
 				return
 
 			case event, ok := <-d.eventChan:
@@ -32,12 +63,8 @@ func (d *Display) startEventHandler() {
 					return
 				}
 
-				// Log the event
-				logger.Debug("Processing UI event: type=%s, message=%s", event.Type, event.Message)
-
 				// Process event
 				d.handleEvent(event)
-				logger.Debug("UI event processed: type=%s", event.Type)
 			}
 		}
 	}()
@@ -66,16 +93,13 @@ func (d *Display) queueEvent(eventType, message string, data interface{}) {
 		Timestamp: time.Now(),
 	}
 
-	logger.Debug("Queueing UI event: type=%s, message=%s", eventType, message)
-
 	// Try to send event to channel with timeout
 	select {
 	case d.eventChan <- event:
 		// Event sent successfully
-		logger.Debug("UI event queued successfully: type=%s", eventType)
 	case <-d.ctx.Done():
 		// Context cancelled
-		logger.Warning("Failed to queue UI event %s: context cancelled", eventType)
+		logger.Debug("Dropped UI event %s: display shutting down", eventType)
 	case <-time.After(EventTimeout):
 		// Timeout - log dropped event
 		logger.Warning("UI event channel blocked, dropped event: %s", eventType)
@@ -95,34 +119,27 @@ func (d *Display) handleEvent(event UIEvent) {
 	// Process based on event type
 	switch event.Type {
 	case EventSpinnerStart:
-		logger.Debug("Starting spinner: %s", event.Message)
 		d.startSpinnerInternal(event.Message)
 
 	case EventSpinnerUpdate:
-		logger.Debug("Updating spinner: %s", event.Message)
 		d.updateSpinnerTextInternal(event.Message)
 
 	case EventSpinnerStop:
-		logger.Debug("Stopping spinner: %s", event.Message)
 		d.stopSpinnerInternal(event.Message)
 
 	case EventSpinnerSuccess:
-		logger.Debug("Spinner success: %s", event.Message)
 		d.successSpinnerInternal(event.Message)
 
 	case EventSpinnerFail:
-		logger.Debug("Spinner fail: %s", event.Message)
 		d.failSpinnerInternal(event.Message)
 
 	case EventSpinnerWarning:
-		logger.Debug("Spinner warning: %s", event.Message)
 		d.warningSpinnerInternal(event.Message)
 
 	case EventProgressStart:
 		if progress, ok := event.Data.(map[string]interface{}); ok {
 			total := int(progress["total"].(float64))
 			title := progress["title"].(string)
-			logger.Debug("Starting progress bar: title=%s, total=%d", title, total)
 			d.startProgressInternal(total, title)
 		} else {
 			logger.Warning("Invalid progress data received for EventProgressStart")
@@ -130,38 +147,30 @@ func (d *Display) handleEvent(event UIEvent) {
 
 	case EventProgressUpdate:
 		if value, ok := event.Data.(float64); ok {
-			logger.Debug("Updating progress bar: value=%f", value)
 			d.updateProgressInternal(int(value))
 		} else {
 			logger.Warning("Invalid progress value received for EventProgressUpdate")
 		}
 
 	case EventProgressStop:
-		logger.Debug("Stopping progress bar")
 		d.stopProgressInternal()
 
 	case EventShowSuccess:
-		logger.Debug("Showing success: %s", event.Message)
 		d.showSuccessInternal(event.Message)
 
 	case EventShowInfo:
-		logger.Debug("Showing info: %s", event.Message)
 		d.showInfoInternal(event.Message)
 
 	case EventShowWarning:
-		logger.Debug("Showing warning: %s", event.Message)
 		d.showWarningInternal(event.Message)
 
 	case EventShowError:
-		logger.Debug("Showing error: %s", event.Message)
 		d.showErrorInternal(event.Message)
 
 	case EventShowHeader:
-		logger.Debug("Showing header: %s", event.Message)
 		d.showHeaderInternal(event.Message)
 
 	case EventShowResults:
-		logger.Debug("Showing results")
 		if results, ok := event.Data.([]*analyser.Result); ok {
 			d.showResultsInternal(results)
 		} else {
@@ -169,7 +178,6 @@ func (d *Display) handleEvent(event UIEvent) {
 		}
 
 	case EventShowTaskInfo:
-		logger.Debug("Showing task info")
 		if task, ok := event.Data.(*types.Task); ok {
 			d.showTaskInfoInternal(task)
 		} else {
@@ -177,7 +185,6 @@ func (d *Display) handleEvent(event UIEvent) {
 		}
 
 	case EventPrintTable:
-		logger.Debug("Printing table")
 		if tableData, ok := event.Data.(map[string]interface{}); ok {
 			headers, hok := tableData["headers"].([]string)
 			rows, rok := tableData["rows"].([][]string)
