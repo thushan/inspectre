@@ -235,7 +235,7 @@ func (l *Logger) formatLogMessage(level LogLevel, taskID string, timestamp time.
 	case FormatColored:
 		prefix := ""
 		if taskID != "" {
-			prefix = fmt.Sprintf("[%s] ", taskID)
+			prefix = fmt.Sprintf("%s | ", pterm.FgDarkGray.Sprint(taskID))
 		}
 
 		switch level {
@@ -254,7 +254,7 @@ func (l *Logger) formatLogMessage(level LogLevel, taskID string, timestamp time.
 	default: // FormatPlain
 		prefix := ""
 		if taskID != "" {
-			prefix = fmt.Sprintf("[%s] ", taskID)
+			prefix = fmt.Sprintf("%s | ", taskID)
 		}
 		levelStr := l.levelToString(level)
 		return fmt.Sprintf("%s [%s] %s%s", timeStr, levelStr, prefix, message)

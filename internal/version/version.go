@@ -2,6 +2,7 @@ package version
 
 import (
 	"fmt"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"log"
 )
 
@@ -22,19 +23,19 @@ const (
 )
 
 func PrintVersionInfo(extendedInfo bool, vlog *log.Logger) {
-	githubUri := GithubHomeText
-	latestUri := Version
+	githubUri := theme.Hyperlink(GithubHomeUri, GithubHomeText)
+	latestUri := theme.Hyperlink(GithubLatestUri, Version)
 	padLatest := fmt.Sprintf("%*s", 40-len(Version), "")
 
-	vlog.Println(`╔──────────────────────────────────────────────────────────────────────────╗
+	vlog.Println(theme.ColourSplash(`╔──────────────────────────────────────────────────────────────────────────╗
 │  ██╗███╗   ██╗███████╗██████╗ ███████╗ ██████╗████████╗██████╗ ███████╗  │
 │  ██║████╗  ██║██╔════╝██╔══██╗██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔════╝  │
 │  ██║██╔██╗ ██║███████╗██████╔╝█████╗  ██║        ██║   ██████╔╝█████╗    │
 │  ██║██║╚██╗██║╚════██║██╔═══╝ ██╔══╝  ██║        ██║   ██╔══██╗██╔══╝    │
 │  ██║██║ ╚████║███████║██║     ███████╗╚██████╗   ██║   ██║  ██║███████╗  │
-│  ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝  │`)
-	vlog.Println("│ ", githubUri, padLatest, latestUri, " │")
-	vlog.Println(`╚──────────────────────────────────────────────────────────────────────────╝`)
+│  ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚══════╝ ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝  │`))
+	vlog.Println(theme.ColourSplash("│ "), theme.StyleUrl(githubUri), padLatest, theme.ColourVersion(latestUri), theme.ColourSplash(" │"))
+	vlog.Println(theme.ColourSplash(`╚──────────────────────────────────────────────────────────────────────────╝`))
 	if extendedInfo {
 		vlog.Println(" Commit:", Commit)
 		vlog.Println("  Built:", Date)

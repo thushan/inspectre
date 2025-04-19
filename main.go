@@ -101,5 +101,5 @@ func main() {
 // showLogo displays the Inspectre logo
 func showLogo() {
 	vlog := log.New(log.Writer(), "", 0)
-	version.PrintVersionInfo(true, vlog)
+	version.PrintVersionInfo(false, vlog)
 }
