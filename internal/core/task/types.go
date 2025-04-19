@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"github.com/panjf2000/ants/v2"
 	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/repository"
@@ -37,15 +38,6 @@ type TaskResult struct {
 	CompletedAt time.Time
 }
 
-// WorkerState tracks the state of a worker
-type WorkerState struct {
-	ID        int
-	IsIdle    bool
-	LastUsed  time.Time
-	TaskCount int
-	Cancel    context.CancelFunc
-}
-
 // Manager handles analyser tasks
 type Manager struct {
 	repoManager      *repository.Manager
@@ -58,21 +50,14 @@ type Manager struct {
 	logger           *logging.Logger
 	display          types.DisplayProvider
 
-	// Worker pool related fields
-	taskQueue    chan *types.Task
-	taskResults  chan TaskResult
-	uiEvents     chan UIEvent
-	workerStates map[int]*WorkerState
-	workersMu    sync.RWMutex
+	// Worker pool and channels
+	workerPool  *ants.Pool
+	taskResults chan TaskResult
+	uiEvents    chan UIEvent
 
 	// Shutdown coordination
 	shutdownOnce sync.Once
 	wg           sync.WaitGroup
-
-	// Configuration
-	minWorkerCount int
-	maxWorkerCount int
-	currentWorkers int
-	closed         bool
-	closedMu       sync.RWMutex
+	closed       bool
+	closedMu     sync.RWMutex
 }

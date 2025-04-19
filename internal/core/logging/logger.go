@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"io"
 	"os"
 	"path/filepath"
@@ -163,7 +164,7 @@ func (l *Logger) CloseTaskLog(taskID string) {
 	if w, exists := l.taskWriters[taskID]; exists {
 		if closer, ok := w.(io.Closer); ok {
 			if err := closer.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing log file for task %s: %v\n", taskID, err)
+				fmt.Fprintf(os.Stderr, "Error closing log file for task %s: %v\n", theme.ColourTaskId(taskID), err)
 			}
 		}
 		delete(l.taskWriters, taskID)

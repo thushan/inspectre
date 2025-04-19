@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"github.com/urfave/cli/v2"
 	"io"
 	"strings"
@@ -10,16 +11,16 @@ import (
 )
 
 func runAction(c *cli.Context) error {
-	logger.Info("Starting run action")
+	logger.Debug("Starting run action")
 	display := createDisplay(c)
-	logger.Info("Display created for run action")
+	logger.Debug("Display created for run action")
 
 	if err := setup(c.String("config")); err != nil {
 		logger.Error("Setup failed: %v", err)
 		display.ShowError(fmt.Sprintf("Setup failed: %v", err))
 		return fmt.Errorf("setup failed: %v", err)
 	}
-	logger.Info("Setup completed successfully")
+	logger.Debug("Setup completed successfully")
 
 	// Verify task manager is initialized
 	if taskManager == nil {
@@ -30,7 +31,7 @@ func runAction(c *cli.Context) error {
 
 	// Set the display on task manager
 	taskManager.SetDisplay(display)
-	logger.Info("Display set on task manager")
+	logger.Debug("Display set on task manager")
 
 	repoURL := c.Args().First()
 	if repoURL == "" {
@@ -38,11 +39,11 @@ func runAction(c *cli.Context) error {
 		display.ShowError("Repository name or URL is required")
 		return fmt.Errorf("repository name or URL is required")
 	}
-	logger.Info("Repository URL: %s", repoURL)
+	logger.Debug("Repository URL: %s", theme.ColourRepository(repoURL))
 
 	// Create a spinner for the task creation
-	spinner := display.StartSpinner(fmt.Sprintf("Creating task for %s", repoURL))
-	logger.Info("Spinner started for task creation")
+	spinner := display.StartSpinner(fmt.Sprintf("Creating task for %s", theme.ColourRepository(repoURL)))
+	logger.Debug("Spinner started for task creation")
 
 	// Verify repository manager is initialized
 	if repoManager == nil {
@@ -57,11 +58,11 @@ func runAction(c *cli.Context) error {
 		spinner.Fail(fmt.Sprintf("Failed to create task: %v", err))
 		return fmt.Errorf("failed to create task: %v", err)
 	}
-	logger.Info("Task created with ID: %s", task.ID)
+	logger.Debug("Task created with ID: %s", theme.ColourTaskId(task.ID))
 
 	// Update spinner text
-	spinner.UpdateText(fmt.Sprintf("Starting task %s for %s", task.ID, repoURL))
-	logger.Info("Starting task %s", task.ID)
+	spinner.UpdateText(fmt.Sprintf("Starting task %s for %s", theme.ColourTaskId(task.ID), theme.ColourRepository(repoURL)))
+	logger.Debug("Starting task %s", theme.ColourTaskId(task.ID))
 
 	// Start the task
 	if err := taskManager.StartTask(task.ID); err != nil {
@@ -69,25 +70,25 @@ func runAction(c *cli.Context) error {
 		spinner.Fail(fmt.Sprintf("Failed to start task: %v", err))
 		return fmt.Errorf("failed to start task: %v", err)
 	}
-	logger.Info("Task %s started successfully", task.ID)
+	logger.Debug("Task %s started successfully", theme.ColourTaskId(task.ID))
 
-	spinner.Success(fmt.Sprintf("Started task %s for repository %s", task.ID, repoURL))
+	spinner.Success(fmt.Sprintf("Started task %s for repository %s", theme.ColourTaskId(task.ID), theme.ColourRepository(repoURL)))
 
 	noWait := c.Bool("no-wait")
 	if noWait {
 		logger.Info("Not waiting for task completion (no-wait option used)")
 		display.ShowInfo(fmt.Sprintf("Task is running in the background. Check status with: inspectre ps"))
-		display.ShowInfo(fmt.Sprintf("View logs with: inspectre logs %s", task.ID))
+		display.ShowInfo(fmt.Sprintf("View logs with: inspectre logs %s", theme.ColourTaskId(task.ID)))
 		return nil
 	}
-	logger.Info("Waiting for task %s to complete", task.ID)
+	logger.Debug("Waiting for task %s to complete", theme.ColourTaskId(task.ID))
 
 	// Show task info
 	display.ShowHeader("Task Information")
 	display.ShowTaskInfo(task)
 
 	waitSpinner := display.StartSpinner("Waiting for task to complete...")
-	logger.Info("Wait spinner started")
+	logger.Debug("Wait spinner started")
 
 	// Use a context with timeout to avoid hanging indefinitely
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -155,7 +156,7 @@ func runAction(c *cli.Context) error {
 						lines := strings.Split(string(data), "\n")
 						for _, line := range lines {
 							if line != "" {
-								fmt.Println(line)
+								fmt.Println("\t" + line)
 							}
 						}
 					}
