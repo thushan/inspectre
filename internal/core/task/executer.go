@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/thushan/inspectre/internal/core/analyser"
-	"github.com/thushan/inspectre/internal/core/repository"
 	"github.com/thushan/inspectre/internal/core/types"
 	"github.com/thushan/inspectre/internal/core/utils"
 	"os"
@@ -122,7 +121,7 @@ func (m *Manager) getRepositoryDetails(repoNameOrURL string) (*types.Repository,
 		// Create temporary repository object for direct URLs
 		repo = &types.Repository{
 			URL:  repoNameOrURL,
-			Type: repository.GuessRepoType(repoNameOrURL),
+			Type: utils.GuessRepoType(repoNameOrURL),
 			Auth: types.Auth{}, // Empty Auth struct
 		}
 	}
