@@ -16,39 +16,6 @@ import (
 
 const PublicReadFilePerm = 0o644
 
-// InsightsCommands returns CLI commands for generating insights
-func InsightsCommands() []*cli.Command {
-	return []*cli.Command{
-		{
-			Name:      "insights",
-			Usage:     "Generate insights for a repository",
-			ArgsUsage: "<repository-name-or-url>",
-			Flags: []cli.Flag{
-				&cli.StringFlag{
-					Name:    "output",
-					Aliases: []string{"o"},
-					Usage:   "Output format (json, markdown, text)",
-					Value:   "text",
-				},
-				&cli.StringFlag{
-					Name:    "file",
-					Aliases: []string{"f"},
-					Usage:   "Output file path (default: stdout)",
-				},
-				&cli.StringFlag{
-					Name:    "config",
-					Aliases: []string{"c"},
-					Usage:   "Custom path for configuration data",
-				},
-				&cli.BoolFlag{
-					Name:  "force",
-					Usage: "Force re-analyser even if insights exist",
-				},
-			},
-			Action: insightsAction,
-		},
-	}
-}
 func insightsAction(c *cli.Context) error {
 	if err := setup(c.String("config")); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
