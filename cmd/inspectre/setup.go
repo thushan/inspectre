@@ -76,7 +76,7 @@ func setup(configPath string) error {
 		}
 
 		// Initialize storage manager
-		storageManager, err = storage.NewManager("file", dataDir)
+		storageManager, err = storage.NewManager(storage.TypeFile, dataDir)
 		if err != nil {
 			logger.Error("Failed to initialize storage manager: %v", err)
 			setupErr = err

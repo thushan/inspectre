@@ -18,6 +18,7 @@ vendor/
 
 # output
 dist/
+data/results/*
 
 # Go workspace file
 go.work
