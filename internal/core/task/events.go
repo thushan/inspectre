@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"github.com/thushan/inspectre/internal/core/analyser"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"time"
 )
 
@@ -57,7 +58,7 @@ func (m *Manager) processTaskResult(result TaskResult) {
 	task, exists := m.tasks[result.TaskID]
 	if !exists {
 		m.tasksMu.Unlock()
-		m.logger.Warning("Received result for unknown task %s", result.TaskID)
+		m.logger.Warning("Received result for unknown task %s", theme.ColourTaskId(result.TaskID))
 		return
 	}
 
@@ -112,30 +113,32 @@ func (m *Manager) handleUIEvent(event UIEvent) {
 		return
 	}
 
+	taskId := theme.ColourTaskId(event.TaskID)
+
 	switch event.EventType {
 	case "started":
-		m.display.StartSpinner(fmt.Sprintf("[%s] %s", event.TaskID, event.Message))
+		m.display.StartSpinner(fmt.Sprintf("[%s] %s", taskId, event.Message))
 
 	case "cloning":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", event.TaskID, event.Message))
+		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
 
 	case "analysing":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", event.TaskID, event.Message))
+		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
 
 	case "completed":
-		m.display.StopSpinner(fmt.Sprintf("[%s] Analysis completed successfully", event.TaskID))
+		m.display.StopSpinner(fmt.Sprintf("[%s] Analysis completed successfully", taskId))
 		if results, ok := event.Data.([]*analyser.Result); ok {
 			m.display.ShowResults(results)
 		}
 
 	case "failed":
-		m.display.ShowError(fmt.Sprintf("[%s] %s", event.TaskID, event.Message))
+		m.display.ShowError(fmt.Sprintf("[%s] %s", taskId, event.Message))
 
 	case "cancelled":
-		m.display.ShowWarning(fmt.Sprintf("[%s] Task was cancelled: %s", event.TaskID, event.Message))
+		m.display.ShowWarning(fmt.Sprintf("[%s] Task was cancelled: %s", taskId, event.Message))
 
 	case "progress":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", event.TaskID, event.Message))
+		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
 	}
 }
 

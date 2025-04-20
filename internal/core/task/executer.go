@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/core/types"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"github.com/thushan/inspectre/internal/core/utils"
 	"os"
 	"time"
@@ -45,11 +46,11 @@ func (m *Manager) executeTask(task *types.Task) TaskResult {
 	m.sendUIEvent(UIEvent{
 		TaskID:    task.ID,
 		EventType: "cloning",
-		Message:   fmt.Sprintf("Cloning repository %s", repo.URL),
+		Message:   fmt.Sprintf("Cloning repository %s", theme.ColourRepository(repo.URL)),
 	})
 
 	// Clone the repository
-	m.logger.TaskInfo(task.ID, "Cloning repository %s to %s", repo.URL, task.RepoDir)
+	m.logger.TaskInfo(task.ID, "Cloning repository %s to %s", theme.ColourRepository(repo.URL), theme.ColourWorkDir(task.RepoDir))
 	if err := m.repoManager.Clone(repo, task.RepoDir); err != nil {
 		result.Error = fmt.Errorf("failed to clone repository: %w", err)
 		return result

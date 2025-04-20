@@ -3,6 +3,7 @@ package analyser
 import (
 	"errors"
 	"fmt"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"os"
 	"path/filepath"
 	"time"
@@ -92,14 +93,14 @@ func (m *Manager) AnalyseRepository(repoPath string, env map[string]string) ([]*
 			Success:      false,
 		}
 
-		m.logger("Running analyser: %s", analyser.Name())
+		m.logger("Running analyser: %s", theme.ColourAnalyser(analyser.Name()))
 
 		// Initialize analyser
 		if err := analyser.Initialize(repoPath, env); err != nil {
 			result.Error = fmt.Sprintf("Initialization failed: %v", err)
 			result.EndTime = time.Now()
 			results = append(results, result)
-			m.logger("Failed to initialize analyser %s: %v", analyser.Name(), err)
+			m.logger("Failed to initialize analyser %s: %v", theme.ColourAnalyser(analyser.Name()), err)
 			continue
 		}
 
@@ -109,7 +110,7 @@ func (m *Manager) AnalyseRepository(repoPath string, env map[string]string) ([]*
 			result.Error = fmt.Sprintf("Execution failed: %v", err)
 			result.EndTime = time.Now()
 			results = append(results, result)
-			m.logger("Analysis failed for %s: %v", analyser.Name(), err)
+			m.logger("Analysis failed for %s: %v", theme.ColourAnalyser(analyser.Name()), err)
 			continue
 		}
 
@@ -119,11 +120,11 @@ func (m *Manager) AnalyseRepository(repoPath string, env map[string]string) ([]*
 		result.EndTime = time.Now()
 		results = append(results, result)
 
-		m.logger("Analyser %s completed successfully with %d metrics", analyser.Name(), len(metrics))
+		m.logger("Analyser %s completed successfully with %d metrics", theme.ColourAnalyser(analyser.Name()), len(metrics))
 
 		// Cleanup
 		if err := analyser.Cleanup(); err != nil {
-			m.logger("Warning: cleanup failed for %s: %v", analyser.Name(), err)
+			m.logger("Warning: cleanup failed for %s: %v", theme.ColourAnalyser(analyser.Name()), err)
 		}
 	}
 
@@ -137,5 +138,5 @@ func (m *Manager) AnalyseRepository(repoPath string, env map[string]string) ([]*
 // RegisterAnalyser adds an analyser to the manager
 func (m *Manager) RegisterAnalyser(analyser Analyser) {
 	m.analysers = append(m.analysers, analyser)
-	m.logger("Registered analyser: %s", analyser.Name())
+	m.logger("Registered analyser: %s", theme.ColourAnalyser(analyser.Name()))
 }

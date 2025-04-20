@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	appctx "github.com/thushan/inspectre/internal/core/context"
-	"github.com/thushan/inspectre/internal/core/logging"
-	"github.com/thushan/inspectre/internal/core/repository"
-	"github.com/thushan/inspectre/internal/extensions"
-	"github.com/thushan/inspectre/internal/storage"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"io"
 	"runtime"
 	"time"
 
+	"github.com/panjf2000/ants/v2"
+	appctx "github.com/thushan/inspectre/internal/core/context"
+	"github.com/thushan/inspectre/internal/core/logging"
+	"github.com/thushan/inspectre/internal/core/repository"
 	"github.com/thushan/inspectre/internal/core/types"
+	"github.com/thushan/inspectre/internal/extensions"
+	"github.com/thushan/inspectre/internal/storage"
 )
 
 // Task status constants
@@ -39,9 +41,10 @@ const (
 	TaskExecutionTimeout = 30 * time.Minute
 	CloneTimeout         = 10 * time.Minute
 
-	// Worker scaling
-	WorkerScaleInterval = 5 * time.Second
-	IdleWorkerTimeout   = 30 * time.Second
+	// Worker pool configuration
+	IdleWorkerTimeout  = 30 * time.Second
+	NonBlockingSubmit  = false
+	PreAllocateWorkers = true
 )
 
 var (
@@ -50,11 +53,12 @@ var (
 	ErrInvalidTaskState   = errors.New("invalid task state")
 	ErrTaskCancelled      = errors.New("task was cancelled")
 	ErrManagerClosed      = errors.New("task manager is closed")
+	ErrTaskQueueFull      = errors.New("task queue is full")
 )
 
 // NewManager creates a new task manager
 func NewManager(repoManager *repository.Manager, storageManager *storage.Manager, extensionManager *extensions.Manager, appCtx *appctx.AppContext) *Manager {
-	// Create contexts for the manager and worker pool
+	// Create contexts for the manager
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Set worker count based on number of CPU cores, with reasonable limits
@@ -73,6 +77,21 @@ func NewManager(repoManager *repository.Manager, storageManager *storage.Manager
 		minWorkers = 1
 	}
 
+	logger := logging.GetLogger()
+
+	// Initialize the ants worker pool
+	pool, err := ants.NewPool(maxWorkers,
+		ants.WithExpiryDuration(IdleWorkerTimeout),
+		ants.WithPreAlloc(PreAllocateWorkers),
+		ants.WithNonblocking(NonBlockingSubmit),
+		ants.WithLogger(antsLogger{logger: logger}))
+
+	if err != nil {
+		logger.Error("Failed to create worker pool: %v", err)
+		// Fallback to a minimal pool size if creation fails
+		pool, _ = ants.NewPool(minWorkers)
+	}
+
 	manager := &Manager{
 		repoManager:      repoManager,
 		storageManager:   storageManager,
@@ -80,25 +99,14 @@ func NewManager(repoManager *repository.Manager, storageManager *storage.Manager
 		tasks:            make(map[string]*types.Task),
 		ctx:              ctx,
 		cancelFunc:       cancel,
-		logger:           logging.GetLogger(),
+		logger:           logger,
 
 		// Channels sized to avoid blocking in normal scenarios
-		taskQueue:    make(chan *types.Task, TaskQueueSize),
-		taskResults:  make(chan TaskResult, TaskResultSize),
-		uiEvents:     make(chan UIEvent, UIEventSize),
-		workerStates: make(map[int]*WorkerState),
-
-		minWorkerCount: minWorkers,
-		maxWorkerCount: maxWorkers,
-		currentWorkers: 0,
-		closed:         false,
+		taskResults: make(chan TaskResult, TaskResultSize),
+		uiEvents:    make(chan UIEvent, UIEventSize),
+		workerPool:  pool,
+		closed:      false,
 	}
-
-	// Start background workers
-	manager.startWorkers()
-
-	// Start worker scaling goroutine
-	manager.startWorkerScaling()
 
 	// Handle task results and UI events
 	manager.startEventHandlers()
@@ -174,20 +182,76 @@ func (m *Manager) StartTask(taskID string) error {
 	// Log task start
 	m.logger.TaskInfo(task.ID, "Task queued at %s", time.Now().Format(time.RFC3339))
 
-	// Send to worker pool
-	select {
-	case m.taskQueue <- task:
-		// Successfully queued task
-		return nil
-	case <-m.ctx.Done():
-		// Manager is shutting down
-		return fmt.Errorf("task manager shutting down: %w", m.ctx.Err())
-	default:
-		// Queue full (should not happen with properly sized queue)
+	// Create a copy of the task for the worker
+	taskCopy := *task
+
+	// Submit task to the worker pool
+	err := m.workerPool.Submit(func() {
+		m.processTask(&taskCopy)
+	})
+
+	if err != nil {
+		// If submission fails, reset the task status
 		m.tasksMu.Lock()
-		task.Status = StatusCreated // Reset status
+		task.Status = StatusCreated
 		m.tasksMu.Unlock()
-		return fmt.Errorf("task queue is full")
+
+		m.logger.Error("Failed to submit task to worker pool: %v", err)
+		return fmt.Errorf("failed to queue task: %w", err)
+	}
+
+	m.logger.Info("Task %s submitted to worker pool", theme.ColourTaskId(task.ID))
+	return nil
+}
+
+// processTask is executed by the worker pool to handle a task
+func (m *Manager) processTask(task *types.Task) {
+	// Update task status to Running
+	m.tasksMu.Lock()
+	storedTask, exists := m.tasks[task.ID]
+	if !exists {
+		m.tasksMu.Unlock()
+		m.logger.Warning("Task %s not found in task map", theme.ColourTaskId(task.ID))
+		return
+	}
+
+	// Skip if task was cancelled while queued
+	if storedTask.Status == StatusCancelled {
+		m.tasksMu.Unlock()
+		m.logger.TaskInfo(task.ID, "Task was cancelled before execution")
+		return
+	}
+
+	storedTask.Status = StatusRunning
+	m.tasksMu.Unlock()
+
+	// Log start of processing
+	m.logger.TaskInfo(task.ID, "Processing task %s for repository %s", theme.ColourTaskId(task.ID), theme.ColourRepository(task.Repository))
+
+	// Send UI event
+	m.sendUIEvent(UIEvent{
+		TaskID:    task.ID,
+		EventType: "started",
+		Message:   fmt.Sprintf("Processing repository %s", theme.ColourRepository(task.Repository)),
+	})
+
+	// Execute the task
+	m.logger.Debug("Executing task %s", theme.ColourTaskId(task.ID))
+	result := m.executeTask(task)
+	m.logger.Debug("Completed execution of task %s", theme.ColourTaskId(task.ID))
+
+	// Send result for processing with timeout to prevent deadlocks
+	m.logger.Debug("Sending results for task %s", theme.ColourTaskId(task.ID))
+	select {
+	case m.taskResults <- result:
+		m.logger.Debug("Results for task %s sent successfully", theme.ColourTaskId(task.ID))
+	case <-m.ctx.Done():
+		// Context cancelled, exit worker
+		m.logger.Warning("Context cancelled during result send for task %s", theme.ColourTaskId(task.ID))
+		return
+	case <-time.After(5 * time.Second):
+		// Couldn't send results after timeout, log and continue
+		m.logger.Warning("Timeout sending results for task %s, dropping results", theme.ColourTaskId(task.ID))
 	}
 }
 
@@ -309,14 +373,6 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(ctx, ShutdownTimeout)
 		defer cancel()
 
-		// Cancel all workers first
-		m.workersMu.Lock()
-		for _, worker := range m.workerStates {
-			worker.Cancel()
-		}
-		m.workersMu.Unlock()
-		m.logger.Info("All workers cancelled")
-
 		// Update status of any running tasks
 		m.tasksMu.Lock()
 		for id, task := range m.tasks {
@@ -329,12 +385,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		m.tasksMu.Unlock()
 		m.logger.Info("All running tasks marked as cancelled")
 
-		// Close channels in the correct order to avoid deadlocks
-		// 1. Close task queue first to stop new tasks from being processed
-		close(m.taskQueue)
-		m.logger.Info("Task queue closed")
+		// Release the worker pool
+		m.workerPool.Release()
+		m.logger.Info("Worker pool released")
 
-		// 2. Wait briefly to allow workers to process final messages
+		// Wait briefly to allow any in-progress tasks to complete
 		select {
 		case <-time.After(200 * time.Millisecond):
 		case <-shutdownCtx.Done():
@@ -342,12 +397,12 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			m.logger.Warning("Shutdown timeout while waiting for workers")
 		}
 
-		// 3. Close result and event channels
+		// Close result and event channels
 		close(m.taskResults)
 		close(m.uiEvents)
 		m.logger.Info("All channels closed")
 
-		// 4. Finally, cancel the main context
+		// Finally, cancel the main context
 		m.cancelFunc()
 		m.logger.Info("Main context cancelled")
 
@@ -374,4 +429,13 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	})
 
 	return err
+}
+
+// Custom logger implementation for ants
+type antsLogger struct {
+	logger *logging.Logger
+}
+
+func (l antsLogger) Printf(format string, args ...interface{}) {
+	l.logger.Debug("ants: "+format, args...)
 }

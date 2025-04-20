@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"github.com/urfave/cli/v2"
 	"io"
 	"os"
@@ -24,7 +25,7 @@ func logsAction(c *cli.Context) error {
 	}
 
 	// Start spinner
-	spinner := display.StartSpinner(fmt.Sprintf("Retrieving logs for task %s", taskID))
+	spinner := display.StartSpinner(fmt.Sprintf("Retrieving logs for task %s", theme.ColourTaskId(taskID)))
 
 	// Get task
 	task, err := taskManager.GetTask(taskID)
@@ -152,7 +153,7 @@ func logsAction(c *cli.Context) error {
 
 				// Exit if task is finished
 				if currentTask.Status != "Running" && currentTask.Status != "Created" {
-					display.ShowInfo(fmt.Sprintf("Task %s is %s, stopping log follow", taskID, currentTask.Status))
+					display.ShowInfo(fmt.Sprintf("Task %s is %s, stopping log follow", theme.ColourTaskId(taskID), currentTask.Status))
 					return nil
 				}
 			case <-c.Context.Done():

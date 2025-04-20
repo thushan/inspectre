@@ -142,7 +142,7 @@ func getOutputOptions(c *cli.Context) ui.DisplayOptions {
 // createDisplay creates a display manager from CLI context
 func createDisplay(c *cli.Context) types.DisplayProvider {
 	display := ui.NewDisplay(getOutputOptions(c))
-	logger.Info("Created new display with options: NoColor=%v, Format=%s, Quiet=%v",
+	logger.Debug("Created new display with options: NoColor=%v, Format=%s, Quiet=%v",
 		c.Bool("no-color"), c.String("output"), c.Bool("quiet"))
 	updateManagersWithDisplay(display)
 	return display

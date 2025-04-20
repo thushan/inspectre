@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sony/sonyflake"
+	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -229,7 +230,7 @@ func (m *Manager) CreateTask(nameOrURL string) (*Task, error) {
 	assetsDir := filepath.Join(baseDir, "assets") // Assets and plugin data
 	logFile := filepath.Join(baseDir, "task.log") // Main log file
 
-	m.logger.Info("Creating task %s for repository %s", taskID, repo.URL)
+	m.logger.Info("Creating task '%s' for repository '%s'", theme.ColourTaskId(taskID), theme.ColourRepository(repo.URL))
 
 	return &Task{
 		ID:         taskID,

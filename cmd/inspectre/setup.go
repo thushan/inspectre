@@ -76,27 +76,27 @@ func setup(configPath string) error {
 		}
 
 		// Initialize storage manager
-		storageManager, err = storage.NewManager("file", dataDir)
+		storageManager, err = storage.NewManager(storage.TypeFile, dataDir)
 		if err != nil {
 			logger.Error("Failed to initialize storage manager: %v", err)
 			setupErr = err
 			return
 		}
-		logger.Info("Storage manager initialized")
+		logger.Debug("Storage manager initialized")
 
 		// Initialize extension manager
 		extensionManager = extensions.NewManager(appConfig.PluginsDir)
 		if err := extensionManager.LoadExtensionsFromConfig(""); err != nil {
 			logger.Warning("Failed to load extensions: %v", err)
 		}
-		logger.Info("Extension manager initialized")
+		logger.Debug("Extension manager initialized")
 
 		// Initialize task manager
 		taskManager = task.NewManager(repoManager, storageManager, extensionManager, appContext)
-		logger.Info("Task manager initialized")
+		logger.Debug("Task manager initialized")
 
 		// Log completion of setup
-		logger.Info("Core components setup completed successfully")
+		logger.Debug("Core components setup completed successfully")
 	})
 
 	return setupErr
@@ -109,7 +109,7 @@ func updateManagersWithDisplay(display types.DisplayProvider) {
 		return
 	}
 
-	logger.Info("Updating managers with display provider")
+	logger.Debug("Updating managers with display provider")
 
 	// Apply display to components that support it
 	if repoManager != nil {
@@ -124,5 +124,5 @@ func updateManagersWithDisplay(display types.DisplayProvider) {
 		logger.Warning("Task manager is nil when setting display")
 	}
 
-	logger.Info("Managers updated with display provider")
+	logger.Debug("Managers updated with display provider")
 }

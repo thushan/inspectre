@@ -11,7 +11,7 @@ import (
 func (d *Display) startEventHandler() {
 	// Create logger locally to avoid circular dependencies
 	logger := logging.GetLogger()
-	logger.Info("Starting UI event handler")
+	logger.Debug("Starting UI event handler")
 
 	d.wg.Add(1)
 	go func() {
@@ -25,13 +25,13 @@ func (d *Display) startEventHandler() {
 			}
 		}()
 
-		logger.Info("UI event handler goroutine started")
+		logger.Debug("UI event handler goroutine started")
 
 		for {
 			select {
 			case <-d.ctx.Done():
 				// Context cancelled, exit
-				logger.Info("UI event handler stopping: context cancelled")
+				logger.Debug("UI event handler stopping: context cancelled")
 
 				// Process any remaining events before exiting
 				// This prevents events getting dropped during shutdown
@@ -53,13 +53,13 @@ func (d *Display) startEventHandler() {
 					}
 				}
 
-				logger.Info("UI event handler successfully drained %d events before exit", drainCount)
+				logger.Debug("UI event handler successfully drained %d events before exit", drainCount)
 				return
 
 			case event, ok := <-d.eventChan:
 				if !ok {
 					// Channel closed
-					logger.Info("UI event handler stopping: event channel closed")
+					logger.Debug("UI event handler stopping: event channel closed")
 					return
 				}
 
