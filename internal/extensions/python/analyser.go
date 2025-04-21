@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -75,12 +76,64 @@ func (a *PythonAnalyser) Initialize(repoPath string, env map[string]string) erro
 	a.repoPath = repoPath
 	a.env = env
 
+	// Ensure the script path is valid
+	if !filepath.IsAbs(a.scriptPath) {
+		// Try multiple locations to find the script
+		foundPath := ""
+
+		// Check in plugins directory from environment
+		if pluginsDir, ok := env["PLUGINS_DIR"]; ok && pluginsDir != "" {
+			scriptPath := filepath.Join(pluginsDir, filepath.Base(a.scriptPath))
+			if fileExists(scriptPath) {
+				foundPath = scriptPath
+			}
+		}
+
+		// Check relative to current working directory
+		if foundPath == "" {
+			cwdPath, err := os.Getwd()
+			if err == nil {
+				// Try in plugins subdirectory
+				scriptPath := filepath.Join(cwdPath, "plugins", filepath.Base(a.scriptPath))
+				if fileExists(scriptPath) {
+					foundPath = scriptPath
+				} else if fileExists(filepath.Join(cwdPath, a.scriptPath)) {
+					// Try direct path
+					foundPath = filepath.Join(cwdPath, a.scriptPath)
+				}
+			}
+		}
+
+		// Check relative to executable
+		if foundPath == "" {
+			if exePath, err := os.Executable(); err == nil {
+				exeDir := filepath.Dir(exePath)
+				scriptPath := filepath.Join(exeDir, "plugins", filepath.Base(a.scriptPath))
+				if fileExists(scriptPath) {
+					foundPath = scriptPath
+				} else if fileExists(filepath.Join(exeDir, a.scriptPath)) {
+					foundPath = filepath.Join(exeDir, a.scriptPath)
+				}
+			}
+		}
+
+		if foundPath != "" {
+			a.scriptPath = foundPath
+		}
+	}
+
 	// Ensure the script exists
-	if _, err := os.Stat(a.scriptPath); os.IsNotExist(err) {
+	if !fileExists(a.scriptPath) {
 		return fmt.Errorf("script not found: %s", a.scriptPath)
 	}
 
 	return nil
+}
+
+// Helper function to check if a file exists
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // Run executes the Python script and collects metrics

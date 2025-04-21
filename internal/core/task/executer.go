@@ -8,6 +8,7 @@ import (
 	"github.com/thushan/inspectre/internal/core/ui/theme"
 	"github.com/thushan/inspectre/internal/core/utils"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -175,11 +176,50 @@ func (m *Manager) prepareAnalysers(task *types.Task) []analyser.Analyser {
 
 // createAnalyserEnvironment prepares environment variables for analysers
 func (m *Manager) createAnalyserEnvironment(task *types.Task, repo *types.Repository) map[string]string {
-	return map[string]string{
+	env := map[string]string{
 		"REPOSITORY_NAME": repo.Name,
 		"REPOSITORY_URL":  repo.URL,
 		"REPOSITORY_TYPE": repo.Type,
 		"TASK_ID":         task.ID,
 		"ASSETS_DIR":      task.AssetsDir,
 	}
+
+	// Get current working directory first
+	cwd, err := os.Getwd()
+	if err == nil {
+		env["APP_DIR"] = cwd
+		env["PLUGINS_DIR"] = filepath.Join(cwd, "plugins")
+
+		// Check if plugins directory exists
+		if _, err := os.Stat(env["PLUGINS_DIR"]); os.IsNotExist(err) {
+			// Try to find plugins in executable directory as fallback
+			if execPath, err := os.Executable(); err == nil {
+				execDir := filepath.Dir(execPath)
+				pluginsDir := filepath.Join(execDir, "plugins")
+
+				// Use executable dir only if plugins dir exists there
+				if _, err := os.Stat(pluginsDir); err == nil {
+					env["APP_DIR"] = execDir
+					env["PLUGINS_DIR"] = pluginsDir
+				}
+			}
+		}
+	} else {
+		// Fallback to executable directory
+		if execPath, err := os.Executable(); err == nil {
+			execDir := filepath.Dir(execPath)
+			env["APP_DIR"] = execDir
+			env["PLUGINS_DIR"] = filepath.Join(execDir, "plugins")
+		}
+	}
+
+	// Add extension manager directory if available
+	if m.extensionManager != nil {
+		extDir := m.extensionManager.GetExtensionsDir()
+		if extDir != "" {
+			env["EXTENSIONS_DIR"] = extDir
+		}
+	}
+
+	return env
 }

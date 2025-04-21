@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -53,7 +54,52 @@ func (a *Analyser) Initialize(repoPath string, env map[string]string) error {
 	a.repoPath = repoPath
 	a.env = env
 
-	// Ensure the executable exists
+	// Ensure the executable exists and has absolute path
+	if !filepath.IsAbs(a.execPath) {
+		// Try multiple locations to find the executable
+		foundPath := ""
+
+		// Check in plugins directory from environment
+		if pluginsDir, ok := env["PLUGINS_DIR"]; ok && pluginsDir != "" {
+			pluginPath := filepath.Join(pluginsDir, filepath.Base(a.execPath))
+			if isExecutable(pluginPath) {
+				foundPath = pluginPath
+			}
+		}
+
+		// Check relative to current working directory
+		if foundPath == "" {
+			cwdPath, err := os.Getwd()
+			if err == nil {
+				// Try in plugins subdirectory
+				pluginPath := filepath.Join(cwdPath, "plugins", filepath.Base(a.execPath))
+				if isExecutable(pluginPath) {
+					foundPath = pluginPath
+				} else if isExecutable(filepath.Join(cwdPath, a.execPath)) {
+					// Try direct path
+					foundPath = filepath.Join(cwdPath, a.execPath)
+				}
+			}
+		}
+
+		// Check relative to executable
+		if foundPath == "" {
+			if exePath, err := os.Executable(); err == nil {
+				exeDir := filepath.Dir(exePath)
+				pluginPath := filepath.Join(exeDir, "plugins", filepath.Base(a.execPath))
+				if isExecutable(pluginPath) {
+					foundPath = pluginPath
+				} else if isExecutable(filepath.Join(exeDir, a.execPath)) {
+					foundPath = filepath.Join(exeDir, a.execPath)
+				}
+			}
+		}
+
+		if foundPath != "" {
+			a.execPath = foundPath
+		}
+	}
+
 	if !isExecutable(a.execPath) {
 		return fmt.Errorf("executable not found or not executable: %s", a.execPath)
 	}
@@ -147,8 +193,18 @@ func isExecutable(path string) bool {
 		return false
 	}
 
-	// Check if it's a regular file and has execute permission
-	return !info.IsDir() && (info.Mode()&0111 != 0)
+	// Check if it's a regular file
+	if info.IsDir() {
+		return false
+	}
+
+	// On Windows, check if it has an executable extension
+	if filepath.Ext(path) == ".exe" || filepath.Ext(path) == ".bat" || filepath.Ext(path) == ".cmd" || filepath.Ext(path) == ".ps1" || filepath.Ext(path) == ".sh" {
+		return true
+	}
+
+	// On Unix-like systems, check execute permission
+	return info.Mode()&0111 != 0
 }
 
 // limitedWriter is a writer that enforces a maximum size to prevent OOM issues

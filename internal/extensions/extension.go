@@ -77,17 +77,33 @@ type Manager struct {
 }
 
 // CLIAnalyserFactory creates CLI analysers
-type CLIAnalyserFactory struct{}
+type CLIAnalyserFactory struct {
+	ExtensionsDir string
+}
 
 func (f *CLIAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error) {
-	return cli.NewCLIAnalyser(ext.Name, ext.Path, ext.Config), nil
+	// Resolve absolute path for CLI extension
+	absPath := ext.Path
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(f.ExtensionsDir, absPath)
+	}
+
+	return cli.NewCLIAnalyser(ext.Name, absPath, ext.Config), nil
 }
 
 // PythonAnalyserFactory creates Python analysers
-type PythonAnalyserFactory struct{}
+type PythonAnalyserFactory struct {
+	ExtensionsDir string
+}
 
 func (f *PythonAnalyserFactory) Create(ext *Extension) (analyser.Analyser, error) {
-	return python.NewPythonAnalyser(ext.Name, ext.Path, ext.Config), nil
+	// Resolve absolute path for Python extension
+	absPath := ext.Path
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(f.ExtensionsDir, absPath)
+	}
+
+	return python.NewPythonAnalyser(ext.Name, absPath, ext.Config), nil
 }
 
 // GolangAnalyserFactory creates Golang plugin analysers
@@ -128,6 +144,21 @@ func NewManager(extensionsDir string) *Manager {
 	// Create context for extension operations
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Ensure extensions directory is valid
+	if extensionsDir == "" {
+		// Default to plugins in current directory
+		extensionsDir = "plugins"
+	}
+
+	// Convert to absolute path if needed
+	if !filepath.IsAbs(extensionsDir) {
+		// Try to get absolute path
+		absPath, err := filepath.Abs(extensionsDir)
+		if err == nil {
+			extensionsDir = absPath
+		}
+	}
+
 	manager := &Manager{
 		extensionsDir: extensionsDir,
 		extensions:    make(map[string]*Extension),
@@ -137,9 +168,9 @@ func NewManager(extensionsDir string) *Manager {
 		cancel:        cancel,
 	}
 
-	// Register factories for different extension types
-	manager.factories[TypeCLI] = &CLIAnalyserFactory{}
-	manager.factories[TypePython] = &PythonAnalyserFactory{}
+	// Register factories for different extension types with the extensions directory
+	manager.factories[TypeCLI] = &CLIAnalyserFactory{ExtensionsDir: extensionsDir}
+	manager.factories[TypePython] = &PythonAnalyserFactory{ExtensionsDir: extensionsDir}
 	manager.factories[TypeGolang] = &GolangAnalyserFactory{ExtensionsDir: extensionsDir}
 
 	return manager
@@ -411,6 +442,11 @@ func (m *Manager) ListExtensions() []*Extension {
 		result = append(result, ext)
 	}
 	return result
+}
+
+// GetExtensionsDir returns the extensions directory
+func (m *Manager) GetExtensionsDir() string {
+	return m.extensionsDir
 }
 
 // ClearCache clears the analyser cache
