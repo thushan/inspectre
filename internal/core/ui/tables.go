@@ -6,6 +6,7 @@ import (
 	"github.com/thushan/inspectre/internal/core/analyser"
 	"github.com/thushan/inspectre/internal/core/logging"
 	"github.com/thushan/inspectre/internal/core/types"
+	"strings"
 	"time"
 )
 
@@ -19,7 +20,25 @@ func (d *Display) showResultsInternal(results []*analyser.Result) {
 		Format:  d.options.Format,
 	})
 
-	fmt.Println(formattedResults)
+	// Split the results into lines and process each line for better formatting
+	lines := strings.Split(formattedResults, "\n")
+
+	// Print lines with proper spacing to ensure clean output
+	for i, line := range lines {
+		// Add extra spacing before headers for better readability
+		if i > 0 && (strings.HasPrefix(line, "Results from") ||
+			strings.HasPrefix(line, "Duration:") ||
+			strings.HasPrefix(line, "Metrics:")) {
+			fmt.Println()
+		}
+
+		fmt.Println(line)
+
+		// Add extra spacing after headers for better readability
+		if strings.HasSuffix(line, "-----") || strings.HasSuffix(line, "===") {
+			fmt.Println()
+		}
+	}
 }
 
 func (d *Display) printTableInternal(headers []string, rows [][]string) {
@@ -27,14 +46,23 @@ func (d *Display) printTableInternal(headers []string, rows [][]string) {
 		return
 	}
 
+	// Create a table with proper spacing and formatting
 	tableData := make(pterm.TableData, 0, len(rows)+1)
 	tableData = append(tableData, headers)
 
+	// Add each row to the table
 	for _, row := range rows {
 		tableData = append(tableData, row)
 	}
 
-	pterm.DefaultTable.WithHasHeader().WithData(tableData).Render()
+	// Configure the table with proper formatting
+	table := pterm.DefaultTable.
+		WithHasHeader().
+		WithData(tableData)
+
+	// Render the table with proper spacing
+	tableStr, _ := table.Srender()
+	fmt.Println(tableStr)
 	fmt.Println()
 }
 
@@ -78,7 +106,10 @@ func (d *Display) showTaskInfoInternal(task *types.Task) {
 		return
 	}
 
-	// Create a table for task details
+	// Print a blank line before task info for better spacing
+	fmt.Println()
+
+	// Create a table for task details with good spacing and format
 	tableData := pterm.TableData{
 		{"Task ID", task.ID},
 		{"Repository", task.Repository},
@@ -96,16 +127,14 @@ func (d *Display) showTaskInfoInternal(task *types.Task) {
 		tableData = append(tableData, []string{"Error", pterm.Red(task.Error)})
 	}
 
-	// Print the table
-	pterm.DefaultTable.WithHasHeader(false).WithData(tableData).Render()
-	fmt.Println()
-}
+	// Configure and render the table
+	table := pterm.DefaultTable.
+		WithHasHeader(false).
+		WithData(tableData)
 
-// PrintResultTable prints a table of results
-func (d *Display) PrintResultTable(headers []string, rows [][]string) {
-	tableData := map[string]interface{}{
-		"headers": headers,
-		"rows":    rows,
-	}
-	d.queueEvent(EventPrintTable, "", tableData)
+	tableStr, _ := table.Srender()
+	fmt.Println(tableStr)
+
+	// Print a blank line after task info for better spacing
+	fmt.Println()
 }

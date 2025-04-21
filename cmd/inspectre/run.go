@@ -83,11 +83,12 @@ func runAction(c *cli.Context) error {
 	}
 	logger.Debug("Waiting for task %s to complete", theme.ColourTaskId(task.ID))
 
-	// Show task info
+	// Show task info after a short delay to avoid UI conflicts
+	time.Sleep(200 * time.Millisecond)
 	display.ShowHeader("Task Information")
 	display.ShowTaskInfo(task)
 
-	waitSpinner := display.StartSpinner("Waiting for task to complete...")
+	waitSpinner := display.StartSpinner("Task is running, waiting for completion...")
 	logger.Debug("Wait spinner started")
 
 	// Use a context with timeout to avoid hanging indefinitely
@@ -125,7 +126,10 @@ func runAction(c *cli.Context) error {
 				logger.Info("Task completed successfully")
 				waitSpinner.Success("Task completed successfully")
 
-				// Show task logs
+				// Add a small delay to ensure clean transitions between UI elements
+				time.Sleep(300 * time.Millisecond)
+
+				// Show task logs with proper header
 				display.ShowHeader("Task Logs")
 				logger.Info("Showing task logs")
 
@@ -156,7 +160,7 @@ func runAction(c *cli.Context) error {
 						lines := strings.Split(string(data), "\n")
 						for _, line := range lines {
 							if line != "" {
-								fmt.Println("\t" + line)
+								fmt.Printf("  %s\n", line)
 							}
 						}
 					}
@@ -165,6 +169,30 @@ func runAction(c *cli.Context) error {
 				logger.Info("Run action completed successfully")
 				return nil
 			}
+
+			// Update spinner text with current status
+			waitSpinner.UpdateText(fmt.Sprintf(
+				"Task %s is %s (Running for %s)...",
+				theme.ColourTaskId(task.ID),
+				theme.ColourStatus(currentTask.Status),
+				formatDuration(time.Since(currentTask.StartTime)),
+			))
 		}
+	}
+}
+
+// formatDuration returns a friendly string representation of a duration
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1f seconds", d.Seconds())
+	} else if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%d minutes %d seconds", m, s)
+	} else {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%d hours %d minutes %d seconds", h, m, s)
 	}
 }

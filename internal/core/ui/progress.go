@@ -15,13 +15,22 @@ func (d *Display) startProgressInternal(total int, title string) {
 		d.progressBar.Stop()
 	}
 
-	// Create new progress bar
-	bar, _ := pterm.DefaultProgressbar.
+	// First make sure spinner is stopped to avoid conflicts
+	d.spinnerMu.Lock()
+	if d.spinner != nil {
+		d.spinner.Stop()
+		d.spinner = nil
+	}
+	d.spinnerMu.Unlock()
+
+	// Create a clean progress bar configuration
+	progressBar := pterm.DefaultProgressbar.
 		WithTotal(total).
 		WithTitle(title).
-		WithRemoveWhenDone(true).
-		Start()
+		WithRemoveWhenDone(true)
 
+	// Create new progress bar
+	bar, _ := progressBar.Start()
 	d.progressBar = bar
 }
 

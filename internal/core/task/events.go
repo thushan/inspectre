@@ -117,28 +117,37 @@ func (m *Manager) handleUIEvent(event UIEvent) {
 
 	switch event.EventType {
 	case "started":
-		m.display.StartSpinner(fmt.Sprintf("[%s] %s", taskId, event.Message))
+		m.display.StartSpinner(fmt.Sprintf("Starting task %s for repository %s", taskId, event.Message))
 
 	case "cloning":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
+		// Force a pause before updating spinner to avoid overlap with task info display
+		time.Sleep(100 * time.Millisecond)
+		m.display.UpdateSpinnerText(fmt.Sprintf("Cloning repository %s", event.Message))
 
 	case "analysing":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
+		// Add a short delay to ensure the message alignment
+		time.Sleep(100 * time.Millisecond)
+		m.display.UpdateSpinnerText(fmt.Sprintf("Running analysers for task %s", taskId))
 
 	case "completed":
-		m.display.StopSpinner(fmt.Sprintf("[%s] Analysis completed successfully", taskId))
+		// Ensure a clean completion message
+		m.display.StopSpinner(fmt.Sprintf("Task %s completed successfully", taskId))
+
+		// Add a brief delay before showing results
+		time.Sleep(200 * time.Millisecond)
+
 		if results, ok := event.Data.([]*analyser.Result); ok {
 			m.display.ShowResults(results)
 		}
 
 	case "failed":
-		m.display.ShowError(fmt.Sprintf("[%s] %s", taskId, event.Message))
+		m.display.ShowError(fmt.Sprintf("Task %s failed: %s", taskId, event.Message))
 
 	case "cancelled":
-		m.display.ShowWarning(fmt.Sprintf("[%s] Task was cancelled: %s", taskId, event.Message))
+		m.display.ShowWarning(fmt.Sprintf("Task %s was cancelled: %s", taskId, event.Message))
 
 	case "progress":
-		m.display.UpdateSpinnerText(fmt.Sprintf("[%s] %s", taskId, event.Message))
+		m.display.UpdateSpinnerText(fmt.Sprintf("%s | %s", taskId, event.Message))
 	}
 }
 

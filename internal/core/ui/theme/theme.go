@@ -52,3 +52,21 @@ func ColourWorkDir(message ...any) string {
 func ColourAnalyser(message ...any) string {
 	return pterm.LightBlue(message...)
 }
+
+// ColourStatus returns a colored representation of a status
+func ColourStatus(status string) string {
+	switch status {
+	case "Completed":
+		return pterm.Green(status)
+	case "Running":
+		return pterm.Blue(status)
+	case "Created", "Queued":
+		return pterm.Cyan(status)
+	case "Failed":
+		return pterm.Red(status)
+	case "Cancelled":
+		return pterm.Yellow(status)
+	default:
+		return status
+	}
+}

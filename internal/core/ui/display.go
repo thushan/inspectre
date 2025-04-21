@@ -48,6 +48,13 @@ func NewDisplay(options DisplayOptions) *Display {
 		pterm.DisableColor()
 	}
 
+	// Set up pterm defaults for consistent formatting
+	pterm.DefaultHeader.Margin = 0
+
+	// Ensure spinners don't conflict with regular output
+	pterm.DefaultSpinner.RemoveWhenDone = true
+	pterm.DefaultSpinner.MessageStyle = pterm.NewStyle()
+
 	// Create context for event handling
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -57,6 +64,7 @@ func NewDisplay(options DisplayOptions) *Display {
 		ctx:       ctx,
 		cancel:    cancel,
 		closed:    false,
+		logger:    logging.GetLogger(),
 	}
 
 	// Start event handling goroutine
@@ -75,9 +83,7 @@ func (d *Display) Close() {
 	d.closed = true
 	d.closedMu.Unlock()
 
-	// Get logger
-	logger := logging.GetLogger()
-	logger.Debug("Closing display manager")
+	d.logger.Debug("Closing display manager")
 
 	// Cancel context to signal shutdown to event handler
 	d.cancel()
@@ -108,16 +114,16 @@ func (d *Display) Close() {
 	select {
 	case <-waitDone:
 		// Handler exited cleanly
-		logger.Debug("Display event handler exited cleanly")
+		d.logger.Debug("Display event handler exited cleanly")
 	case <-time.After(ShutdownTimeout):
 		// Timeout - log warning
-		logger.Warning("Display manager shutdown timed out waiting for event handler")
+		d.logger.Warning("Display manager shutdown timed out waiting for event handler")
 	}
 
 	// Close event channel after event handler exits or times out
 	// This prevents sends to a closed channel if the handler is still running
 	close(d.eventChan)
-	logger.Debug("Display manager closed")
+	d.logger.Debug("Display manager closed")
 }
 
 // StartSpinner starts a spinner
@@ -177,10 +183,27 @@ func (d *Display) Confirm(message string) bool {
 		return true // Default to yes in quiet mode
 	}
 
+	// Make sure no spinner is running during prompt
+	d.spinnerMu.Lock()
+	if d.spinner != nil {
+		d.spinner.Stop()
+		d.spinner = nil
+	}
+	d.spinnerMu.Unlock()
+
 	result, _ := pterm.DefaultInteractiveConfirm.
 		WithDefaultText(message).
 		WithDefaultValue(true).
 		Show()
 
 	return result
+}
+
+// PrintResultTable prints a table of results
+func (d *Display) PrintResultTable(headers []string, rows [][]string) {
+	tableData := map[string]interface{}{
+		"headers": headers,
+		"rows":    rows,
+	}
+	d.queueEvent(EventPrintTable, "", tableData)
 }
